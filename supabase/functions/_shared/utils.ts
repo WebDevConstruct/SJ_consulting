@@ -12,14 +12,20 @@ import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-
 // Adjust ALLOWED_ORIGINS to match Vercel deployment URL
 
 const ALLOWED_ORIGINS = [
-  "https://sj-consulting.vercel.app",     // TODO: update with real Vercel URL
-  "http://localhost:3000",                // Frontend dev server
+  "https://sj-consulting-frontend.vercel.app",
+  "https://sj-consulting.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:5173",
 ];
 
 export function corsHeaders(origin: string | null): HeadersInit {
-  const allowed = origin && ALLOWED_ORIGINS.includes(origin)
-    ? origin
-    : ALLOWED_ORIGINS[0];
+  const envFrontend = typeof Deno !== "undefined" ? Deno.env.get("FRONTEND_URL") : null;
+  const isAllowed = origin && (
+    ALLOWED_ORIGINS.includes(origin) ||
+    (envFrontend && origin === envFrontend.replace(/\/$/, ""))
+  );
+
+  const allowed = isAllowed ? origin! : ALLOWED_ORIGINS[0];
 
   return {
     "Access-Control-Allow-Origin": allowed,
