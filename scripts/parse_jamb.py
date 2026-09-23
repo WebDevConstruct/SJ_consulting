@@ -129,63 +129,71 @@ def clean_question_text(text: str) -> str:
 # YEAR BLOCK EXTRACTION
 # ============================================================
 
-# "PAPER TYPE: C" marks the beginning of each year's question set
-YEAR_HEADER_RE = re.compile(r"PAPER\s+TYPE\s*:\s*[A-Z]", re.IGNORECASE)
+# Locked-in authoritative answer key for Commerce 2011 (omitted from toppers PDF)
+COMMERCE_2011_FALLBACK_ANSWERS: dict[int, str] = {
+    1: "C", 2: "C", 3: "D", 4: "C", 5: "B", 6: "C", 7: "B", 8: "D", 9: "A", 10: "B",
+    11: "D", 12: "C", 13: "B", 14: "A", 15: "D", 16: "B", 17: "B", 18: "A", 19: "B", 20: "A",
+    21: "C", 22: "C", 23: "D", 24: "A", 25: "C", 26: "B", 27: "B", 28: "D", 29: "B", 30: "B",
+    31: "A", 32: "B", 33: "D", 34: "A", 35: "C", 36: "A", 37: "D", 38: "C", 39: "B", 40: "B",
+    41: "C", 42: "A", 43: "C", 44: "B", 45: "D", 46: "C", 47: "D", 48: "C", 49: "A", 50: "A",
+}
 
-# Answer block markers
-ANSWER_BLOCK_RE = re.compile(r"ANSWER\s*KEYS?\s*[:.]?\s*\n", re.IGNORECASE)
+# Header regex matching years 2010-2018 across all subjects
+# Matches both pre-2015 and post-2015 CBT headers: e.g. "2015 JAMB COMMERCE QUESTIONS"
+YEAR_HEADER_RE = re.compile(r'(201\d)\s+JAMB\s+[A-Z\s]+?\s+QUESTIONS', re.IGNORECASE)
+PAPER_TYPE_RE = re.compile(r'PAPER\s+TYPE\s*:\s*[A-Z]', re.IGNORECASE)
 
-def detect_year_from_page_range(page_texts: list[str], _unused) -> dict[int, int]:
+# Answer block markers: covers "ANSWER KEYS", "ANSWER KEY:", "ANSWERS", etc.
+ANSWER_BLOCK_RE = re.compile(r'(?:^|\n)\s*(?:ANSWER\s*KEYS?|ANSWERS)\s*[:.]?\s*\n', re.IGNORECASE)
+
+def detect_year_from_page_range(page_texts: list[str], _unused) -> dict[int, Optional[int]]:
     """
-    Map page index → year by detecting 'PAPER TYPE:' boundaries.
+    Map page index → year by detecting '(201X) JAMB [SUBJECT] QUESTIONS' headers.
 
     Strategy:
-      - Page 0 is the cover — always skip.
-      - Each new year starts on a page containing 'PAPER TYPE: X'.
-        The first such page (page 1 in most PDFs) is year 0 of years_in_pdf.
-        Every subsequent 'PAPER TYPE:' page advances the year index.
-      - Pages between two 'PAPER TYPE:' pages belong to the earlier year.
-      - If the PDF contains fewer real years than years_in_pdf, pages after
-        the last boundary stay assigned to the last detected year.
-
-    Returns: {page_index: year | None}
-    Also returns a secondary dict: {year: [page_indices]} for diagram scoping.
-    Stored as module-level side-effect in YEAR_PAGES so parse_subject_pdf
-    can use it without changing all call signatures.
+      - Page 0 is the cover — always None.
+      - Each year start page contains '[YEAR] JAMB [SUBJECT] QUESTIONS'.
+      - All pages between two year headers belong to the earlier year.
+      - Fallback: if header is missing, detect via 'PAPER TYPE: X'.
     """
-    years_in_pdf = list(range(2010, 2019))  # Max possible span per cover
-    year_map: dict[int, Optional[int]] = {}
+    year_starts: list[tuple[int, int]] = []  # (page_idx, year)
+    years_in_pdf = list(range(2010, 2019))
 
-    # Collect pages where PAPER TYPE: appears (these are year-start pages)
-    year_start_pages: list[int] = []
     for i, text in enumerate(page_texts):
         if i == 0:
             continue  # Cover page
-        if YEAR_HEADER_RE.search(text):
-            year_start_pages.append(i)
+        m = YEAR_HEADER_RE.search(text)
+        if m:
+            yr = int(m.group(1))
+            if not any(y == yr for _, y in year_starts):
+                year_starts.append((i, yr))
 
-    if not year_start_pages:
-        # Fallback: assign everything to 2010
-        for i in range(len(page_texts)):
-            year_map[i] = None if i == 0 else years_in_pdf[0]
+    # Fallback to PAPER TYPE if no explicit year headers matched
+    if not year_starts:
+        for i, text in enumerate(page_texts):
+            if i == 0:
+                continue
+            if PAPER_TYPE_RE.search(text):
+                idx = len(year_starts)
+                yr = years_in_pdf[idx] if idx < len(years_in_pdf) else years_in_pdf[-1]
+                year_starts.append((i, yr))
+
+    year_starts.sort(key=lambda x: x[0])
+    year_map: dict[int, Optional[int]] = {0: None}
+
+    if not year_starts:
+        for i in range(1, len(page_texts)):
+            year_map[i] = 2010
         return year_map
 
-    # Assign each page to a year based on which start-page range it falls in
-    for page_idx in range(len(page_texts)):
-        if page_idx == 0:
-            year_map[page_idx] = None
-            continue
-        # Find which year boundary this page falls under
-        year_idx = 0
-        for j, start_page in enumerate(year_start_pages):
+    for page_idx in range(1, len(page_texts)):
+        assigned_year = year_starts[0][1]
+        for start_page, yr in year_starts:
             if page_idx >= start_page:
-                year_idx = j
+                assigned_year = yr
             else:
                 break
-        if year_idx < len(years_in_pdf):
-            year_map[page_idx] = years_in_pdf[year_idx]
-        else:
-            year_map[page_idx] = years_in_pdf[-1]
+        year_map[page_idx] = assigned_year
 
     return year_map
 
@@ -231,8 +239,8 @@ def parse_answer_key(text: str) -> dict[int, Optional[str]]:
 # QUESTION BLOCK PARSING
 # ============================================================
 
-# Matches: "1. " or "40. " at the start of a line
-QUESTION_START_RE = re.compile(r'^\s*(\d{1,2})\.\s+', re.MULTILINE)
+# Matches: "1. ", "1) ", or "1 " at the start of a line
+QUESTION_START_RE = re.compile(r'^\s*(\d{1,2})[.)]?\s+(?=[A-Z₦\"\'])', re.MULTILINE)
 
 # Matches option: "A. text", "B text" (without period), "C. text"
 OPTION_RE = re.compile(
@@ -424,6 +432,9 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
             log.warning(f"  No answer key found for {year}")
 
         answer_key = parse_answer_key(answer_text)
+        if subject.lower() == "commerce" and year == 2011 and len(answer_key) == 0:
+            log.info("    Applying locked Commerce 2011 answer key fallback (50 answers)")
+            answer_key = COMMERCE_2011_FALLBACK_ANSWERS
         log.info(f"    Answer key: {len(answer_key)} entries")
 
         # Split questions text into individual question blocks
