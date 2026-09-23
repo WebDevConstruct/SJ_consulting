@@ -1,0 +1,31 @@
+.env
+.env.local
+.env.*.local
+
+# Supabase local dev
+supabase/.temp/
+supabase/functions/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+
+# Node (if frontend is in this repo later)
+node_modules/
+.next/
+dist/
+.vercel/
+
+# Generated seed files (large, regenerate from parser)
+scripts/seeds/*.sql
+scripts/seeds/*.json
+
+# Extracted diagrams (upload to Supabase Storage, not git)
+assets/diagrams/
+
+# OS
+.DS_Store
+Thumbs.db
