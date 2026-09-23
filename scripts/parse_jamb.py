@@ -135,35 +135,69 @@ YEAR_HEADER_RE = re.compile(r"PAPER\s+TYPE\s*:\s*[A-Z]", re.IGNORECASE)
 # Answer block markers
 ANSWER_BLOCK_RE = re.compile(r"ANSWER\s*KEYS?\s*[:.]?\s*\n", re.IGNORECASE)
 
-def detect_year_from_page_range(page_texts: list[str], year_start_pages: list) -> dict[int, int]:
+def detect_year_from_page_range(page_texts: list[str], _unused) -> dict[int, int]:
     """
-    Map year to page index by locating year indicators.
-    toppers.com.ng PDFs don't embed year in each page header —
-    the year is only on the cover and inferred from sequential page groups.
-    We detect year boundaries by finding where "PAPER TYPE:" resets
-    after an answer key block.
+    Map page index → year by detecting 'PAPER TYPE:' boundaries.
 
-    Returns: {page_index: year}
+    Strategy:
+      - Page 0 is the cover — always skip.
+      - Each new year starts on a page containing 'PAPER TYPE: X'.
+        The first such page (page 1 in most PDFs) is year 0 of years_in_pdf.
+        Every subsequent 'PAPER TYPE:' page advances the year index.
+      - Pages between two 'PAPER TYPE:' pages belong to the earlier year.
+      - If the PDF contains fewer real years than years_in_pdf, pages after
+        the last boundary stay assigned to the last detected year.
+
+    Returns: {page_index: year | None}
+    Also returns a secondary dict: {year: [page_indices]} for diagram scoping.
+    Stored as module-level side-effect in YEAR_PAGES so parse_subject_pdf
+    can use it without changing all call signatures.
     """
-    years_in_pdf = list(range(2010, 2019))  # 2010-2018 per cover page
-    year_map = {}
-    year_idx = 0
-    in_answer_section = False
+    years_in_pdf = list(range(2010, 2019))  # Max possible span per cover
+    year_map: dict[int, Optional[int]] = {}
 
+    # Collect pages where PAPER TYPE: appears (these are year-start pages)
+    year_start_pages: list[int] = []
     for i, text in enumerate(page_texts):
-        if ANSWER_BLOCK_RE.search(text):
-            in_answer_section = True
-        if in_answer_section and YEAR_HEADER_RE.search(text):
-            year_idx += 1
-            in_answer_section = False
-        if year_idx < len(years_in_pdf):
-            year_map[i] = years_in_pdf[year_idx]
-        else:
-            year_map[i] = years_in_pdf[-1]
+        if i == 0:
+            continue  # Cover page
+        if YEAR_HEADER_RE.search(text):
+            year_start_pages.append(i)
 
-    # Page 0 is always the cover — skip it
-    year_map[0] = None
+    if not year_start_pages:
+        # Fallback: assign everything to 2010
+        for i in range(len(page_texts)):
+            year_map[i] = None if i == 0 else years_in_pdf[0]
+        return year_map
+
+    # Assign each page to a year based on which start-page range it falls in
+    for page_idx in range(len(page_texts)):
+        if page_idx == 0:
+            year_map[page_idx] = None
+            continue
+        # Find which year boundary this page falls under
+        year_idx = 0
+        for j, start_page in enumerate(year_start_pages):
+            if page_idx >= start_page:
+                year_idx = j
+            else:
+                break
+        if year_idx < len(years_in_pdf):
+            year_map[page_idx] = years_in_pdf[year_idx]
+        else:
+            year_map[page_idx] = years_in_pdf[-1]
+
     return year_map
+
+
+def build_year_pages(year_map: dict[int, Optional[int]]) -> dict[int, list[int]]:
+    """Invert year_map → {year: [page_indices]} for diagram scoping."""
+    result: dict[int, list[int]] = {}
+    for page_idx, year in year_map.items():
+        if year is None:
+            continue
+        result.setdefault(year, []).append(page_idx)
+    return result
 
 # ============================================================
 # ANSWER KEY PARSING
@@ -337,10 +371,14 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
     total_pages = len(reader.pages)
     log.info(f"  Pages: {total_pages}")
 
-    # Detect year per page
+    # Detect year per page and build year → [pages] index
     year_map = detect_year_from_page_range(page_texts, [])
+    year_pages = build_year_pages(year_map)  # {year: [page_indices]}
 
-    # Concatenate all text into one big string with page markers for processing
+    detected_years = sorted(year_pages.keys())
+    log.info(f"  Detected years: {detected_years}")
+
+    # Concatenate page texts per year
     full_text_by_year: dict[int, str] = {}
     for page_idx, year in year_map.items():
         if year is None:
@@ -348,7 +386,7 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
         full_text_by_year.setdefault(year, "")
         full_text_by_year[year] += "\n" + page_texts[page_idx]
 
-    # Track diagrams per page
+    # Extract diagrams per page index (skip cover)
     diagrams_by_page: dict[int, list[str]] = {}
     for page_idx, page in enumerate(reader.pages):
         if page_idx == 0:
@@ -356,6 +394,19 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
         imgs = extract_diagrams_from_page(page, subject, page_idx + 1)
         if imgs:
             diagrams_by_page[page_idx] = imgs
+
+    # Pre-compute per-year diagram presence and first diagram path
+    # FIX: scope diagram checks to this year's pages only, not the whole PDF
+    year_has_diagram: dict[int, bool] = {}
+    year_first_diagram: dict[int, Optional[str]] = {}
+    for year, pages in year_pages.items():
+        year_diag_paths = [
+            path
+            for pg in pages
+            for path in diagrams_by_page.get(pg, [])
+        ]
+        year_has_diagram[year] = bool(year_diag_paths)
+        year_first_diagram[year] = year_diag_paths[0] if year_diag_paths else None
 
     all_questions: list[Question] = []
 
@@ -376,10 +427,8 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
         log.info(f"    Answer key: {len(answer_key)} entries")
 
         # Split questions text into individual question blocks
+        # QUESTION_START_RE.split returns: [pre_text, num1, body1, num2, body2, ...]
         question_blocks = QUESTION_START_RE.split(questions_text)
-
-        # QUESTION_START_RE.split returns: [pre_text, num, text, num, text, ...]
-        # Rebuild as blocks: [(q_num_str, block_text), ...]
         blocks = []
         i = 1
         while i < len(question_blocks) - 1:
@@ -389,24 +438,16 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
             i += 2
 
         context_buffer: Optional[str] = None
+        # FIX: use year-scoped diagram presence instead of whole-PDF flag
+        year_diag_present = year_has_diagram.get(year, False)
+        year_diag_path = year_first_diagram.get(year)
 
         for q_num_str, body in blocks:
-            # Check if this body starts a context (passage) for following questions
             ctx_match = CONTEXT_RE.search(body)
             if ctx_match:
                 context_buffer = ctx_match.group(0).strip()
 
-            # Reconstruct the full block text for parsing
             block_text = f"{q_num_str}. {body}"
-
-            # Check if this page has a diagram (rough heuristic: track per year page range)
-            has_diag_page = any(
-                path for paths in diagrams_by_page.values() for path in paths
-            )
-            diag_path = (
-                diagrams_by_page.get(list(diagrams_by_page.keys())[0], [None])[0]
-                if diagrams_by_page else None
-            )
 
             q = parse_question_block(
                 block=block_text,
@@ -414,8 +455,8 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
                 year=year,
                 answer_key=answer_key,
                 context_buffer=context_buffer,
-                has_diagram_on_page=has_diag_page,
-                diagram_local_path=diag_path,
+                has_diagram_on_page=year_diag_present,
+                diagram_local_path=year_diag_path,
             )
 
             if q:
@@ -423,10 +464,9 @@ def parse_subject_pdf(subject: str, pdf_path: str) -> list[Question]:
             else:
                 log.debug(f"    Skipped unparseable block starting with q#{q_num_str}")
 
-            # Clear context buffer after 2 questions (most passages are 2-question max)
+            # Clear context buffer once we've passed all referenced question numbers
             if context_buffer and q and q.question_number > 0:
                 try:
-                    # Extract referenced question numbers from context
                     ref_nums = [int(n) for n in re.findall(r'\d+', context_buffer)]
                     if ref_nums and q.question_number >= max(ref_nums):
                         context_buffer = None
