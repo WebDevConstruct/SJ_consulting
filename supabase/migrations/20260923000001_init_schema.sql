@@ -155,7 +155,7 @@ CREATE TABLE cbt_questions (
     context_text    TEXT,                 -- "Use the table below to answer questions 44 and 45"
     question_text   TEXT NOT NULL,
     options         JSONB NOT NULL,       -- {"A": "...", "B": "...", "C": "...", "D": "..."}
-    correct_option  TEXT NOT NULL CHECK (correct_option IN ('A', 'B', 'C', 'D')),
+    correct_option  TEXT CHECK (correct_option IN ('A', 'B', 'C', 'D')),  -- NULL = disputed/no authoritative answer
     explanation     TEXT,                 -- Optional post-answer explanation
     has_diagram     BOOLEAN NOT NULL DEFAULT false,
     diagram_url     TEXT,                 -- Supabase Storage public URL after upload
