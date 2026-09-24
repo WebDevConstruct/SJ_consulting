@@ -315,12 +315,14 @@ CREATE POLICY "cutoffs_admin_write" ON programme_cutoffs FOR ALL TO authenticate
 -- 4. UNILAG ADMISSION ANALYSIS ENGINE RPC
 -- ============================================================
 
+DROP FUNCTION IF EXISTS analyze_unilag_admission;
+
 CREATE OR REPLACE FUNCTION analyze_unilag_admission(
     p_programme_slug     TEXT,
     p_jamb_score         NUMERIC,
     p_utme_subjects      JSONB DEFAULT '{}'::jsonb,     -- {"English Language": 70, "Mathematics": 65, "Economics": 72, "Accounting": 68}
     p_olevel_grades      JSONB DEFAULT '{}'::jsonb,     -- {"English Language": "A1", "Mathematics": "B2", "Economics": "A1", "Commerce": "B3", "Accounting": "B2"}
-    p_sittings           SMALLINT DEFAULT 1,
+    p_sittings           INT DEFAULT 1,                 -- INT prevents type resolution errors from JS and SQL
     p_post_utme_score    NUMERIC DEFAULT NULL,          -- Post-UTME score /30 (or NULL if not taken yet)
     p_state_of_origin    TEXT DEFAULT NULL,
     p_session            TEXT DEFAULT '2024/2025'
