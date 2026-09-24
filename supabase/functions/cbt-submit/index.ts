@@ -6,13 +6,16 @@
  * Server-side CBT grading. Accepts user answers, grades against correct_option
  * (which never left the server), commits the attempt, and updates leaderboard score.
  *
- * Security:
+ * Security & Reliability:
  *   - JWT required
  *   - session_id must belong to the authenticated user
- *   - Session must not be expired (expires_at checked server-side)
+ *   - Session must not be expired (checked if expires_at is set; safe for untimed sessions)
  *   - Session must not already be submitted (idempotency guard)
  *   - correct_option fetched server-side ONLY — never returned to client
  *   - Leaderboard score incremented atomically via RPC to prevent race conditions
+ *   - Accurate time calculation capped to exam duration (no arbitrary 9999 glitch)
+ *   - Guard against empty question sets / division-by-zero
+ *   - Robust error logging on post-scoring updates
  */
 
 import {
@@ -81,12 +84,20 @@ Deno.serve(async (req: Request) => {
     return err("This session has already been submitted", 409, origin);
   }
 
+  // Ensure question_ids is a valid, non-empty array
+  if (!Array.isArray(session.question_ids) || session.question_ids.length === 0) {
+    return err("Session has no questions to grade", 400, origin);
+  }
+
   const now = new Date();
-  const expiresAt = new Date(session.expires_at);
-  // Allow a 30-second grace period for network latency
-  const gracePeriodMs = 30_000;
-  if (now.getTime() > expiresAt.getTime() + gracePeriodMs) {
-    return err("Session has expired. Time limit exceeded.", 410, origin);
+
+  // Guard against untimed sessions (expires_at is null in untimed solo mode)
+  if (session.expires_at) {
+    const expiresAt = new Date(session.expires_at);
+    const gracePeriodMs = 30_000; // 30-second grace period for latency
+    if (!isNaN(expiresAt.getTime()) && now.getTime() > expiresAt.getTime() + gracePeriodMs) {
+      return err("Session has expired. Time limit exceeded.", 410, origin);
+    }
   }
 
   // ---- Fetch correct answers (service_role — correct_option never left server) ----
@@ -123,7 +134,22 @@ Deno.serve(async (req: Request) => {
   }
 
   const totalQuestions = session.question_ids.length;
-  const timeSpent = Math.floor((now.getTime() - new Date(session.started_at).getTime()) / 1000);
+
+  // Accurate time spent calculation:
+  // Measure elapsed seconds from started_at. If session had a timed expiry, cap at duration limit.
+  const startedAt = session.started_at ? new Date(session.started_at) : now;
+  const rawTimeSpent = !isNaN(startedAt.getTime())
+    ? Math.max(0, Math.floor((now.getTime() - startedAt.getTime()) / 1000))
+    : 0;
+
+  let timeSpent = rawTimeSpent;
+  if (session.expires_at) {
+    const expiresAt = new Date(session.expires_at);
+    if (!isNaN(expiresAt.getTime()) && !isNaN(startedAt.getTime())) {
+      const allocatedDuration = Math.max(0, Math.floor((expiresAt.getTime() - startedAt.getTime()) / 1000));
+      timeSpent = Math.min(rawTimeSpent, allocatedDuration);
+    }
+  }
 
   // ---- Commit attempt (idempotent: UNIQUE constraint on session_id) ----
   const { error: attemptErr } = await svc
@@ -137,13 +163,13 @@ Deno.serve(async (req: Request) => {
       exam_type: session.exam_type,
       total_questions: totalQuestions,
       score,
-      time_spent_seconds: Math.min(timeSpent, session.expires_at ? 9999 : timeSpent),
+      time_spent_seconds: timeSpent,
       user_answers: answerMap,
       per_question_results: perQuestionResults,
     });
 
   if (attemptErr) {
-    // Could be duplicate submission race — check if already exists
+    // Duplicate submission race — check if already committed
     if (attemptErr.code === "23505") {
       return err("Session already submitted", 409, origin);
     }
@@ -152,18 +178,27 @@ Deno.serve(async (req: Request) => {
   }
 
   // ---- Mark session as submitted ----
-  await svc
+  const { error: sessionUpdateErr } = await svc
     .from("cbt_sessions")
     .update({ is_submitted: true })
     .eq("id", session.id);
 
+  if (sessionUpdateErr) {
+    console.error("Critical: Failed to mark session as submitted:", sessionUpdateErr);
+  }
+
   // ---- Update leaderboard score ----
   // Atomic increment via RPC to handle concurrent updates safely
   const pointsEarned = score * POINTS_PER_CORRECT;
-  await svc.rpc("increment_leaderboard_score", {
-    p_user_id: user.id,
-    p_points: pointsEarned,
-  });
+  if (pointsEarned > 0) {
+    const { error: lbErr } = await svc.rpc("increment_leaderboard_score", {
+      p_user_id: user.id,
+      p_points: pointsEarned,
+    });
+    if (lbErr) {
+      console.error("Critical: Failed to increment leaderboard score:", lbErr);
+    }
+  }
 
   // ---- Handle peer session result ----
   if (session.mode === "peer" && session.peer_session_id) {
@@ -176,11 +211,14 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  // Return score but NOT correct answers (client will show on analysis page via own attempts)
+  // Safe percentage calculation (prevents division by zero / NaN)
+  const percentage = totalQuestions > 0 ? Math.round((score / totalQuestions) * 100) : 0;
+
+  // Return score but NOT correct answers (client reviews on analysis page)
   return ok({
     score,
     total_questions: totalQuestions,
-    percentage: Math.round((score / totalQuestions) * 100),
+    percentage,
     time_spent_seconds: timeSpent,
     points_earned: pointsEarned,
   }, origin);
@@ -197,18 +235,21 @@ async function handlePeerSessionResult(
   score: number,
   winBonus: number,
 ): Promise<void> {
-  const { data: peerSession } = await svc
+  const { data: peerSession, error: peerFetchErr } = await svc
     .from("cbt_peer_sessions")
     .select("host_user_id, challenger_user_id, host_score, challenger_score, status")
     .eq("id", peerSessionId)
     .single();
 
-  if (!peerSession || peerSession.status === "completed") return;
+  if (peerFetchErr || !peerSession || peerSession.status === "completed") {
+    if (peerFetchErr) console.error("Peer session fetch error:", peerFetchErr);
+    return;
+  }
 
   const isHost = peerSession.host_user_id === userId;
   const updateField = isHost ? "host_score" : "challenger_score";
 
-  const updatedScores = {
+  const updatedScores: Record<string, unknown> = {
     [updateField]: score,
   };
 
@@ -234,15 +275,22 @@ async function handlePeerSessionResult(
 
     // Award win bonus to winner
     if (winnerId) {
-      await svc.rpc("increment_leaderboard_score", {
+      const { error: bonusErr } = await svc.rpc("increment_leaderboard_score", {
         p_user_id: winnerId,
         p_points: winBonus,
       });
+      if (bonusErr) {
+        console.error("Critical: Failed to award peer win bonus:", bonusErr);
+      }
     }
   }
 
-  await svc
+  const { error: peerUpdateErr } = await svc
     .from("cbt_peer_sessions")
     .update(updatedScores)
     .eq("id", peerSessionId);
+
+  if (peerUpdateErr) {
+    console.error("Critical: Failed to update peer session scores:", peerUpdateErr);
+  }
 }
