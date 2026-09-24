@@ -303,7 +303,7 @@ def parse_question_block(
     stem = clean_question_text(stem)
 
     # Determine if this question references a diagram
-    is_diagram_q = (
+    is_diagram_q = bool(
         has_diagram_on_page
         or bool(re.search(r'diagram|figure|chart|graph', stem, re.IGNORECASE))
         or (context_buffer and re.search(r'diagram|figure', context_buffer, re.IGNORECASE))
@@ -548,11 +548,12 @@ def write_sql_seed(all_questions: list[Question]) -> Path:
         context = escape_sql_string(q.context_text)
         correct = escape_sql_string(q.correct_option)
 
+        has_diag_sql = "true" if q.has_diagram else "false"
         values.append(
             f"    ('{q.id}', {escape_sql_string(q.subject)}, 'JAMB', "
             f"{q.year}, {q.question_number}, {context},\n"
             f"     {escape_sql_string(q.question_text)},\n"
-            f"     '{options_json}'::jsonb, {correct}, {str(q.has_diagram).lower()})"
+            f"     '{options_json}'::jsonb, {correct}, {has_diag_sql})"
         )
 
     lines.append(",\n".join(values))
