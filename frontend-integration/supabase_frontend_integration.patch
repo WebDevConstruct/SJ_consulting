@@ -1,0 +1,611 @@
+From e88d19571796758a770f453c5273c62b18775e6a Mon Sep 17 00:00:00 2001
+From: Olumidelala <olumide2956@gmail.com>
+Date: Thu, 24 Sep 2026 02:24:37 +0100
+Subject: [PATCH] feat: supabase client, auth wiring, admission engine helpers,
+ and integration guide
+
+---
+ .env.example                          |   4 +
+ .gitignore                            |   1 +
+ BACKEND_INTEGRATION.md                | 124 ++++++++++++++
+ package.json                          |   1 +
+ src/components/forms/sign-in-form.tsx |  42 ++++-
+ src/components/forms/sign-up-form.tsx |  59 ++++++-
+ src/lib/api.ts                        | 229 ++++++++++++++++++++++++++
+ src/lib/supabase.ts                   |  14 ++
+ 8 files changed, 459 insertions(+), 15 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 BACKEND_INTEGRATION.md
+ create mode 100644 src/lib/api.ts
+ create mode 100644 src/lib/supabase.ts
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..9810d4e
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,4 @@
++# Supabase configuration for SJ Consult frontend
++# Get these from your Supabase Dashboard: Project Settings -> API
++NEXT_PUBLIC_SUPABASE_URL=https://ahzdspdmjptxkilquhqa.supabase.co
++NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/BACKEND_INTEGRATION.md b/BACKEND_INTEGRATION.md
+new file mode 100644
+index 0000000..42ab0fb
+--- /dev/null
++++ b/BACKEND_INTEGRATION.md
+@@ -0,0 +1,124 @@
++# SJ Consult — Backend & Supabase Integration Guide
++
++Hey Dimeji, here is the direct, no-fluff summary of the backend integration on this branch (`feat/supabase-integration`).
++
++---
++
++## 1. Backend Architecture (Direct Answer)
++We are using **Supabase as our complete backend** (PostgreSQL + Supabase Auth + Row-Level Security + Storage + RPC functions).
++- **No custom Express/Nest server is needed**: The frontend queries Supabase directly using `@supabase/supabase-js`.
++- **Security**: PostgreSQL Row-Level Security (RLS) ensures candidates can only access/edit their own data, while admins manage blogs, site info, and cut-off marks.
++- **Auth**: Supabase handles sign up, email confirmation links, sessions, and JWTs automatically.
++
++---
++
++## 2. What Was Added in This Branch
++
++1. **`src/lib/supabase.ts`**: Initialized Supabase client configured from environment variables.
++2. **`src/lib/api.ts`**: Clean, strongly typed helper functions:
++   - `runAdmissionAnalysis(params)` — calls the UNILAG Admission Engine RPC.
++   - `getFeaturedTestimonials()` — fetches approved testimonials.
++   - `submitUserTestimonial(testimonial)` — allows authenticated users to submit/edit their own quote.
++   - `getPublishedBlogs()` — loads published articles from the `blogs` table.
++   - `getAnnouncements(category?)` — dynamic site updates/guidelines for the homepage.
++3. **`src/components/forms/sign-up-form.tsx`**:
++   - Wired to `supabase.auth.signUp(...)`.
++   - Passes candidate metadata (`name`, `age`, `phone`, `user_profile`, `written_jamb`, `year`).
++   - A database trigger automatically creates the corresponding `profiles` row upon signup.
++4. **`src/components/forms/sign-in-form.tsx`**:
++   - Wired to `supabase.auth.signInWithPassword(...)`.
++   - Redirects to `/` on success, displays error alert on failure.
++5. **`.env.example`**:
++   ```env
++   NEXT_PUBLIC_SUPABASE_URL=https://ahzdspdmjptxkilquhqa.supabase.co
++   NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
++   ```
++
++---
++
++## 3. UNILAG Admission Analysis Engine (How to Use)
++
++The admission engine runs server-side in PostgreSQL. It calculates the authentic UNILAG admission aggregate, checks requirements, compares against official 2024/2025 cut-offs, and recommends alternative programmes.
++
++### Code Snippet:
++```typescript
++import { runAdmissionAnalysis } from "@/lib/api";
++
++const result = await runAdmissionAnalysis({
++  programmeSlug: "accounting", // e.g. 'accounting', 'medicine-and-surgery', 'law'
++  jambScore: 285,
++  utmeSubjects: {
++    "English Language": 72,
++    "Mathematics": 68,
++    "Economics": 75,
++    "Accounting": 70,
++  },
++  olevelGrades: {
++    "English Language": "A1",
++    "Mathematics": "B2",
++    "Economics": "A1",
++    "Financial Accounting": "B2",
++    "Commerce": "A1",
++  },
++  sittings: 1,
++  postUtmeScore: 24.5, // out of 30 (or omit if pre-PUME)
++  stateOfOrigin: "Lagos", // Used to benchmark against UNILAG Catchment Cut-offs
++  session: "2024/2025",
++});
++```
++
++### What `result` Returns:
++```json
++{
++  "session": "2024/2025",
++  "programme": {
++    "name": "Accounting",
++    "slug": "accounting",
++    "degree": "B.Sc.",
++    "faculty": "Management Sciences"
++  },
++  "candidate_profile": {
++    "sittings": 1,
++    "jamb_score": 285,
++    "post_utme_score": 24.5,
++    "state_of_origin": "Lagos"
++  },
++  "aggregate_breakdown": {
++    "jamb_contribution": 35.63,   // /50
++    "post_utme_contribution": 24.50, // /30
++    "olevel_contribution": 19.20,  // /20 (A1=4.0, B2=3.6, B3=3.2, C4=2.8, C5=2.4, C6=2.0)
++    "total_aggregate": 79.33,     // /100
++    "max_possible": 100.00
++  },
++  "eligibility": {
++    "is_eligible": true,
++    "audit_checks": [
++      { "rule": "Sitting Restriction", "status": "PASSED", "message": "Number of O'Level sittings meets programme criteria." },
++      { "rule": "O'Level Credits", "status": "PASSED", "message": "Minimum credit requirements met (5 credits)." }
++    ]
++  },
++  "benchmark_comparison": {
++    "benchmark_score": 71.50,
++    "benchmark_type": "Catchment (Lagos)",
++    "difference": 7.83,
++    "verdict": "Competitive (Above Catchment (Lagos) Cut-off)",
++    "verdict_color": "green",
++    "source_title": "UNILAG 2024/2025 Cut-Off Marks",
++    "verified_at": "2026-09-24"
++  },
++  "recommended_alternatives": [
++    { "name": "Mechanical Engineering", "slug": "mechanical-engineering", "status": "Strong Match (Above Cut-off)", "benchmark": 78.50, "difference": 0.83 },
++    { "name": "Nursing Science", "slug": "nursing-science", "status": "Strong Match (Above Cut-off)", "benchmark": 76.75, "difference": 2.58 },
++    { "name": "Computer Science", "slug": "computer-science", "status": "Strong Match (Above Cut-off)", "benchmark": 76.25, "difference": 3.08 },
++    { "name": "Medicine and Surgery", "slug": "medicine-and-surgery", "status": "Competitive Alternative", "benchmark": 82.50, "difference": -3.17 }
++  ],
++  "disclaimer": "Official UNILAG cut-off marks and admission calculations provided by SJ Consult are for advisory and strategic analysis purposes only."
++}
++```
++
++---
++
++## 4. Setup Steps
++1. Run `npm install` to install `@supabase/supabase-js`.
++2. Copy `.env.example` to `.env.local` and paste the Supabase anon key provided by the team.
++3. Run `npm run dev`.
+diff --git a/package.json b/package.json
+index 06bbac4..060ceb1 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@supabase/supabase-js": "^2.49.1",
+     "clsx": "^2.1.1",
+     "framer-motion": "^13.3.0",
+     "lucide-react": "^1.46.0",
+diff --git a/src/components/forms/sign-in-form.tsx b/src/components/forms/sign-in-form.tsx
+index 684f323..0cc9314 100644
+--- a/src/components/forms/sign-in-form.tsx
++++ b/src/components/forms/sign-in-form.tsx
+@@ -1,15 +1,38 @@
+ "use client";
+ 
+-import { type FormEvent } from "react";
++import { useState, type FormEvent } from "react";
+ import Link from "next/link";
++import { useRouter } from "next/navigation";
++import { supabase } from "@/lib/supabase";
+ import { AuthLayout } from "@/components/forms/auth-layout";
+ import { TextField } from "@/components/forms/text-field";
+ 
+ export function SignInForm() {
+-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
++  const router = useRouter();
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+     event.preventDefault();
+-    // Wiring to api/v1/signin happens once the authenticated build
+-    // phase begins; the backend allocates the session cookie from there.
++    setError(null);
++    setLoading(true);
++
++    const formData = new FormData(event.currentTarget);
++    const identifier = formData.get("identifier") as string;
++    const password = formData.get("password") as string;
++
++    const { error: signInError } = await supabase.auth.signInWithPassword({
++      email: identifier,
++      password,
++    });
++
++    setLoading(false);
++    if (signInError) {
++      setError(signInError.message);
++      return;
++    }
++
++    router.push("/");
+   };
+ 
+   return (
+@@ -49,11 +72,18 @@ export function SignInForm() {
+           </div>
+         </div>
+ 
++        {error && (
++          <div className="rounded-sm border border-red-500/30 bg-red-500/10 p-3 text-[13.5px] text-red-400">
++            {error}
++          </div>
++        )}
++
+         <button
+           type="submit"
+-          className="focus-gold mt-1 rounded-sm border border-gold-400 bg-gold-metal-soft px-6 py-3.5 text-[14.5px] font-semibold text-ink shadow-gold transition-transform hover:scale-[1.01]"
++          disabled={loading}
++          className="focus-gold mt-1 rounded-sm border border-gold-400 bg-gold-metal-soft px-6 py-3.5 text-[14.5px] font-semibold text-ink shadow-gold transition-transform hover:scale-[1.01] disabled:opacity-50"
+         >
+-          Sign in
++          {loading ? "Signing in..." : "Sign in"}
+         </button>
+       </form>
+     </AuthLayout>
+diff --git a/src/components/forms/sign-up-form.tsx b/src/components/forms/sign-up-form.tsx
+index a161920..937b435 100644
+--- a/src/components/forms/sign-up-form.tsx
++++ b/src/components/forms/sign-up-form.tsx
+@@ -1,6 +1,7 @@
+ "use client";
+ 
+ import { useState, type FormEvent } from "react";
++import { supabase } from "@/lib/supabase";
+ import { AuthLayout } from "@/components/forms/auth-layout";
+ import { TextField } from "@/components/forms/text-field";
+ import { SelectField } from "@/components/forms/select-field";
+@@ -20,11 +21,45 @@ export function SignUpForm() {
+   const [profile, setProfile] = useState<UserProfile>("aspirant");
+   const [writtenJamb, setWrittenJamb] = useState<"yes" | "no">("no");
+   const [submitted, setSubmitted] = useState(false);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
+ 
+-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
++  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+     event.preventDefault();
+-    // Wiring to api/v1/signup, api/v1/send and api/v1/verify_email
+-    // happens once the authenticated build phase begins.
++    setError(null);
++    setLoading(true);
++
++    const formData = new FormData(event.currentTarget);
++    const email = formData.get("email") as string;
++    const password = formData.get("password") as string;
++    const name = formData.get("name") as string;
++    const age = formData.get("age");
++    const phone = formData.get("phone") as string;
++    const user_profile = profile;
++    const written_jamb = writtenJamb;
++    const year = formData.get("year");
++
++    const { error: signUpError } = await supabase.auth.signUp({
++      email,
++      password,
++      options: {
++        data: {
++          name,
++          age: age ? parseInt(age as string, 10) : null,
++          phone,
++          user_profile,
++          written_jamb: user_profile === "aspirant" ? written_jamb : null,
++          year: user_profile === "undergraduate" ? parseInt(year as string, 10) : null,
++        },
++      },
++    });
++
++    setLoading(false);
++    if (signUpError) {
++      setError(signUpError.message);
++      return;
++    }
++
+     setSubmitted(true);
+   };
+ 
+@@ -32,14 +67,13 @@ export function SignUpForm() {
+     return (
+       <AuthLayout
+         title="Check your email"
+-        subtitle="This is a preview of the confirmation state — account creation isn't wired to the backend yet."
+-        footerText="Already have an account?"
++        subtitle="We've sent a verification link to your email address."
++        footerText="Already verified?"
+         footerLinkHref="/signin"
+         footerLinkLabel="Sign in"
+       >
+         <p className="text-[14.5px] leading-relaxed text-current/65">
+-          We&rsquo;ll send a verification code to the email you enter here
+-          once sign-up is connected to the API.
++          Please check your inbox and click the confirmation link to activate your account.
+         </p>
+       </AuthLayout>
+     );
+@@ -133,11 +167,18 @@ export function SignUpForm() {
+           />
+         )}
+ 
++        {error && (
++          <div className="rounded-sm border border-red-500/30 bg-red-500/10 p-3 text-[13.5px] text-red-400">
++            {error}
++          </div>
++        )}
++
+         <button
+           type="submit"
+-          className="focus-gold mt-2 rounded-sm border border-gold-400 bg-gold-metal-soft px-6 py-3.5 text-[14.5px] font-semibold text-ink shadow-gold transition-transform hover:scale-[1.01]"
++          disabled={loading}
++          className="focus-gold mt-2 rounded-sm border border-gold-400 bg-gold-metal-soft px-6 py-3.5 text-[14.5px] font-semibold text-ink shadow-gold transition-transform hover:scale-[1.01] disabled:opacity-50"
+         >
+-          Create account
++          {loading ? "Creating account..." : "Create account"}
+         </button>
+       </form>
+     </AuthLayout>
+diff --git a/src/lib/api.ts b/src/lib/api.ts
+new file mode 100644
+index 0000000..b76b825
+--- /dev/null
++++ b/src/lib/api.ts
+@@ -0,0 +1,229 @@
++import { supabase } from "@/lib/supabase";
++
++// ============================================================
++// 1. UNILAG ADMISSION ANALYSIS ENGINE
++// ============================================================
++
++export interface AdmissionAnalysisParams {
++  programmeSlug: string; // e.g. 'accounting', 'medicine-and-surgery', 'law'
++  jambScore: number; // e.g. 285
++  utmeSubjects: Record<string, number>; // e.g. {"English Language": 72, "Mathematics": 68, "Economics": 75}
++  olevelGrades: Record<string, string>; // e.g. {"English Language": "A1", "Mathematics": "B2", "Economics": "A1"}
++  sittings?: number; // default 1
++  postUtmeScore?: number; // out of 30 (or null if pre-PUME)
++  stateOfOrigin?: string; // e.g. 'Lagos', 'Ogun' (matches UNILAG catchment benchmarks)
++  session?: string; // default '2024/2025'
++}
++
++export interface AdmissionAnalysisResult {
++  session: string;
++  institution: string;
++  programme: {
++    slug: string;
++    name: string;
++    degree: string;
++    faculty: string;
++  };
++  candidate_profile: {
++    jamb_score: number;
++    post_utme_score: number | null;
++    sittings: number;
++    state_of_origin: string | null;
++  };
++  aggregate_breakdown: {
++    jamb_contribution: number;
++    post_utme_contribution: number;
++    olevel_contribution: number;
++    total_aggregate: number;
++    max_possible: number;
++  };
++  eligibility: {
++    is_eligible: boolean;
++    audit_checks: Array<{
++      rule: string;
++      status: "PASSED" | "FAILED";
++      message: string;
++    }>;
++  };
++  benchmark_comparison: {
++    benchmark_score: number | null;
++    benchmark_type: string;
++    difference: number | null;
++    verdict: string;
++    verdict_color: "green" | "amber" | "red" | "gray";
++    source_title: string | null;
++    source_url: string | null;
++    verified_at: string | null;
++  };
++  recommended_alternatives: Array<{
++    slug: string;
++    name: string;
++    faculty: string;
++    benchmark: number;
++    difference: number;
++    status: string;
++  }>;
++  disclaimer: string;
++}
++
++/**
++ * Runs the UNILAG Admission Analysis Engine via Supabase RPC.
++ */
++export async function runAdmissionAnalysis(
++  params: AdmissionAnalysisParams
++): Promise<AdmissionAnalysisResult> {
++  const { data, error } = await supabase.rpc("analyze_unilag_admission", {
++    p_programme_slug: params.programmeSlug,
++    p_jamb_score: params.jambScore,
++    p_utme_subjects: params.utmeSubjects,
++    p_olevel_grades: params.olevelGrades,
++    p_sittings: params.sittings ?? 1,
++    p_post_utme_score: params.postUtmeScore ?? null,
++    p_state_of_origin: params.stateOfOrigin ?? null,
++    p_session: params.session ?? "2024/2025",
++  });
++
++  if (error) {
++    throw new Error(error.message);
++  }
++
++  return data as AdmissionAnalysisResult;
++}
++
++// ============================================================
++// 2. TESTIMONIALS API
++// ============================================================
++
++export interface Testimonial {
++  id: string;
++  name: string;
++  role: string;
++  quote: string;
++  rating: number;
++  is_featured: boolean;
++}
++
++/**
++ * Fetch approved/featured testimonials for public homepage.
++ */
++export async function getFeaturedTestimonials(): Promise<Testimonial[]> {
++  const { data, error } = await supabase
++    .from("testimonials")
++    .select("id, name, role, quote, rating, is_featured")
++    .eq("is_featured", true)
++    .order("created_at", { ascending: false });
++
++  if (error) {
++    console.error("Error fetching testimonials:", error);
++    return [];
++  }
++
++  return data || [];
++}
++
++/**
++ * Submit or update a user's own testimonial.
++ */
++export async function submitUserTestimonial(testimonial: {
++  quote: string;
++  name: string;
++  role: string;
++  rating?: number;
++}) {
++  const {
++    data: { user },
++  } = await supabase.auth.getUser();
++
++  if (!user) throw new Error("Must be logged in to submit a testimonial");
++
++  const { data, error } = await supabase
++    .from("testimonials")
++    .upsert({
++      user_id: user.id,
++      name: testimonial.name,
++      role: testimonial.role,
++      quote: testimonial.quote,
++      rating: testimonial.rating ?? 5,
++    })
++    .select()
++    .single();
++
++  if (error) throw error;
++  return data;
++}
++
++// ============================================================
++// 3. BLOG POSTS API
++// ============================================================
++
++export interface BlogPost {
++  id: string;
++  slug: string;
++  title: string;
++  subtext: string;
++  summary: string | null;
++  content: string;
++  image_url: string | null;
++  published_at: string | null;
++  created_at: string;
++}
++
++/**
++ * Fetch published blog articles.
++ */
++export async function getPublishedBlogs(): Promise<BlogPost[]> {
++  const { data, error } = await supabase
++    .from("blogs")
++    .select("id, slug, title, subtext, summary, content, image_url, published_at, created_at")
++    .eq("is_published", true)
++    .order("published_at", { ascending: false });
++
++  if (error) {
++    console.error("Error fetching blogs:", error);
++    return [];
++  }
++
++  return data || [];
++}
++
++// ============================================================
++// 4. ANNOUNCEMENTS / INFORMATION DESK API
++// ============================================================
++
++export interface Announcement {
++  id: string;
++  category: "mentorship" | "unilag" | "jamb" | "accommodation";
++  title: string;
++  subtext: string;
++  content: string;
++  summary: string | null;
++  image_url: string | null;
++  link: string | null;
++  location: string | null;
++  created_at: string;
++}
++
++/**
++ * Fetch active announcements/guideline items by category.
++ */
++export async function getAnnouncements(
++  category?: "mentorship" | "unilag" | "jamb" | "accommodation"
++): Promise<Announcement[]> {
++  let query = supabase
++    .from("announcements")
++    .select("*")
++    .eq("is_published", true)
++    .order("created_at", { ascending: false });
++
++  if (category) {
++    query = query.eq("category", category);
++  }
++
++  const { data, error } = await query;
++  if (error) {
++    console.error("Error fetching announcements:", error);
++    return [];
++  }
++
++  return data || [];
++}
+diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
+new file mode 100644
+index 0000000..1c44fd0
+--- /dev/null
++++ b/src/lib/supabase.ts
+@@ -0,0 +1,14 @@
++import { createClient } from "@supabase/supabase-js";
++
++const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
++const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
++
++if (!supabaseUrl || !supabaseAnonKey) {
++  if (typeof window !== "undefined") {
++    console.warn(
++      "SJ Consult: Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY. Please configure your .env.local file."
++    );
++  }
++}
++
++export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+-- 
+2.34.1
+
