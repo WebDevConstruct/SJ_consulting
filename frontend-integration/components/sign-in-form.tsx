@@ -3,7 +3,7 @@
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
+import { login } from "@/lib/api";
 import { AuthLayout } from "@/components/forms/auth-layout";
 import { TextField } from "@/components/forms/text-field";
 
@@ -21,18 +21,14 @@ export function SignInForm() {
     const identifier = formData.get("identifier") as string;
     const password = formData.get("password") as string;
 
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: identifier,
-      password,
-    });
-
-    setLoading(false);
-    if (signInError) {
-      setError(signInError.message);
-      return;
+    try {
+      await login({ identifier, password });
+      router.push("/");
+    } catch (err: any) {
+      setError(err?.message ?? "Sign in failed. Please check your credentials.");
+    } finally {
+      setLoading(false);
     }
-
-    router.push("/");
   };
 
   return (

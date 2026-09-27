@@ -227,3 +227,392 @@ export async function getAnnouncements(
 
   return data || [];
 }
+
+// ============================================================
+// 5. CANDIDATE DASHBOARD (single-call aggregation)
+// ============================================================
+
+export interface RecentAttempt {
+  id: string;
+  subject: string;
+  track_type: "subject" | "topic" | "combination";
+  mode: "solo" | "peer";
+  exam_type: string;
+  total_questions: number;
+  score: number;
+  /** Score as a percentage, e.g. 72.5 */
+  score_pct: number;
+  time_spent_seconds: number;
+  attempted_at: string;
+}
+
+export interface DashboardAnalysis {
+  total_attempts: number;
+  /** Overall average score percentage across all attempts */
+  avg_score_pct: number | null;
+  best_score_pct: number | null;
+  total_questions_done: number;
+  total_time_seconds: number;
+}
+
+export interface SubjectTrend {
+  subject: string;
+  attempts: number;
+  avg_score_pct: number | null;
+  best_score_pct: number | null;
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  username: string;
+  avatar_url: string | null;
+  leaderboard_score: number;
+  /** True only for the currently authenticated user */
+  is_caller: boolean;
+}
+
+export interface LeaderboardData {
+  caller_rank: number | null;
+  caller_score: number;
+  total_users: number;
+  /** 5 users above + caller + 5 users below — contextual, not just top-10 */
+  nearby: LeaderboardEntry[];
+}
+
+export interface PendingDuel {
+  id: string;
+  room_code: string;
+  subject: string;
+  track_type: string;
+  status: "waiting" | "in_progress";
+  /** Whether the caller is the host or the invited challenger */
+  role: "host" | "challenger";
+  opponent_username: string | null;
+  opponent_avatar: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface CandidateDashboard {
+  recent_attempts: RecentAttempt[];
+  analysis: DashboardAnalysis;
+  subject_trend: SubjectTrend[];
+  leaderboard: LeaderboardData;
+  pending_duels: PendingDuel[];
+}
+
+/**
+ * Fetches everything needed to render the aspirant dashboard in one RPC call.
+ *
+ * Replaces the three separate endpoints described in the spec:
+ *   api/v1/dashboard/cbt_history
+ *   api/v1/dashboard/analysis
+ *   api/v1/dashboard/leaderboard
+ *
+ * Usage:
+ *   const dashboard = await getCandidateDashboard();
+ *   // dashboard.recent_attempts → history cards (max 5)
+ *   // dashboard.analysis        → overall stats widget
+ *   // dashboard.subject_trend   → bar/radar chart data
+ *   // dashboard.leaderboard     → rank card + nearby peers
+ *   // dashboard.pending_duels   → open challenge notifications
+ */
+export async function getCandidateDashboard(): Promise<CandidateDashboard> {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) throw new Error("Must be logged in to fetch dashboard");
+
+  const { data, error } = await supabase.rpc("get_candidate_dashboard", {
+    p_user_id: user.id,
+  });
+
+  if (error) throw new Error(error.message);
+
+  return data as CandidateDashboard;
+}
+
+// ============================================================
+// 6. AUTH — USERNAME OR EMAIL LOGIN
+// ============================================================
+
+export interface LoginParams {
+  /** Either a username (e.g. "johndoe") or a full email address */
+  identifier: string;
+  password: string;
+}
+
+export interface LoginResult {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  token_type: string;
+  user: {
+    id: string;
+    email: string;
+    created_at: string;
+  };
+}
+
+/**
+ * Sign in using either a username OR an email address.
+ *
+ * The username → email resolution happens securely on the server inside
+ * the auth-login Edge Function. Attackers cannot enumerate usernames or
+ * emails from the client side.
+ *
+ * After calling this, set the session on the Supabase client so that
+ * all subsequent requests are authenticated:
+ *
+ *   const result = await login({ identifier: "johndoe", password: "..." });
+ *   await supabase.auth.setSession({
+ *     access_token:  result.access_token,
+ *     refresh_token: result.refresh_token,
+ *   });
+ */
+export async function login(params: LoginParams): Promise<LoginResult> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/auth-login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      identifier: params.identifier.trim(),
+      password: params.password,
+    }),
+  });
+
+  const body = await response.json();
+
+  if (!response.ok) {
+    // Surface the server's generic error message (never exposes internal detail)
+    throw new Error(body?.error ?? "Login failed. Please try again.");
+  }
+
+  return body as LoginResult;
+}
+
+// ============================================================
+// 7. PEER MATCHMAKING
+// ============================================================
+
+export interface CreateDuelParams {
+  subject: "accounts" | "biology" | "economics" | "commerce";
+  track_type: "subject" | "topic" | "combination";
+  /** Required only when track_type === 'topic' */
+  topic?: string;
+  /**
+   * Optional: pass a username to send a named invite.
+   * Omit to create an open room-code challenge instead.
+   */
+  opponent_username?: string;
+}
+
+export interface CreateDuelResult {
+  peer_session_id: string;
+  room_code: string;
+  subject: string;
+  track_type: string;
+  total_questions: number;
+  expires_at: string;
+  /** 'named_invite' if opponent_username was passed, else 'room_code' */
+  invite_method: "named_invite" | "room_code";
+  opponent_username: string | null;
+}
+
+/**
+ * Create a peer CBT challenge.
+ *
+ * AFTER calling this:
+ *  1. Display `result.room_code` so the host can share it (Method B).
+ *  2. Subscribe to the peer session via Supabase Realtime so the host
+ *     knows when the opponent joins (see `subscribeToDuelStart`).
+ *
+ * The opponent:
+ *  - Named invite: receives a Realtime INSERT event on cbt_peer_sessions
+ *    with their user_id as challenger_user_id → show "Accept challenge" modal.
+ *  - Room code: calls `joinPeerDuel({ room_code })` manually.
+ */
+export async function createPeerDuel(params: CreateDuelParams): Promise<CreateDuelResult> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/create-peer-duel`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
+    },
+    body: JSON.stringify(params),
+  });
+
+  const body = await response.json();
+  if (!response.ok) throw new Error(body?.error ?? "Failed to create duel");
+  return body as CreateDuelResult;
+}
+
+export interface CBTQuestion {
+  id: string;
+  subject: string;
+  topic: string | null;
+  exam_type: string;
+  year: number;
+  question_number: number;
+  context_text: string | null;
+  question_text: string;
+  options: { A: string; B: string; C: string; D: string };
+  has_diagram: boolean;
+  diagram_url: string | null;
+}
+
+export interface JoinDuelParams {
+  /** 6-char room code (e.g. "JAMB9K"). Provide this OR peer_session_id. */
+  room_code?: string;
+  /** UUID of the peer session. Provide this OR room_code. */
+  peer_session_id?: string;
+}
+
+export interface JoinDuelResult {
+  peer_session_id: string;
+  room_code: string;
+  /** The challenger's personal session ID — use this when calling cbt-submit */
+  your_session_id: string;
+  /** The host's session ID — needed by the host's frontend via Realtime */
+  host_session_id: string;
+  subject: string;
+  track_type: string;
+  time_limit_seconds: number;
+  started_at: string;
+  expires_at: string;
+  questions: CBTQuestion[];
+}
+
+/**
+ * Join an existing peer duel by room code or session ID.
+ *
+ * Works for both invite methods:
+ *   - Named invite: pass `peer_session_id` from the Realtime notification.
+ *   - Room code: pass `room_code` from the host's shared code.
+ *
+ * On success, navigate both players to the CBT screen and start the timer.
+ * Each player uses their own `your_session_id` when submitting answers.
+ */
+export async function joinPeerDuel(params: JoinDuelParams): Promise<JoinDuelResult> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/join-peer-duel`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
+    },
+    body: JSON.stringify(params),
+  });
+
+  const body = await response.json();
+  if (!response.ok) throw new Error(body?.error ?? "Failed to join duel");
+  return body as JoinDuelResult;
+}
+
+/**
+ * Subscribe to incoming challenge invites for the current user.
+ *
+ * Mount this on the authenticated layout so any page can show the
+ * "You've been challenged!" toast/modal in real-time.
+ *
+ * Usage:
+ *   const { data: { user } } = await supabase.auth.getUser();
+ *   const unsub = subscribeToIncomingChallenges(user.id, (invite) => {
+ *     showModal(`${invite.host_username} challenged you! Accept?`, () =>
+ *       joinPeerDuel({ peer_session_id: invite.peer_session_id })
+ *     );
+ *   });
+ *   // Call unsub() on component unmount
+ */
+export function subscribeToIncomingChallenges(
+  userId: string,
+  onInvite: (invite: { peer_session_id: string; subject: string; room_code: string }) => void,
+): () => void {
+  const channel = supabase
+    .channel(`incoming-challenges-${userId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "cbt_peer_sessions",
+        filter: `challenger_user_id=eq.${userId}`,
+      },
+      (payload: { new: { id: string; subject: string; room_code: string } }) => {
+        const row = payload.new as {
+          id: string;
+          subject: string;
+          room_code: string;
+        };
+        onInvite({
+          peer_session_id: row.id,
+          subject:         row.subject,
+          room_code:       row.room_code,
+        });
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+/**
+ * Subscribe to a specific duel session starting.
+ * The HOST calls this after `createPeerDuel` to know when the challenger joins.
+ *
+ * Usage:
+ *   const unsub = subscribeToDuelStart(peer_session_id, (result) => {
+ *     // Navigate host to CBT screen with result.host_session_id
+ *   });
+ *   // Call unsub() when navigating away
+ */
+export function subscribeToDuelStart(
+  peerSessionId: string,
+  onStart: (update: { status: string; started_at: string }) => void,
+): () => void {
+  const channel = supabase
+    .channel(`duel-start-${peerSessionId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "UPDATE",
+        schema: "public",
+        table: "cbt_peer_sessions",
+        filter: `id=eq.${peerSessionId}`,
+      },
+      (payload: { new: { status: string; started_at: string } }) => {
+        const row = payload.new as { status: string; started_at: string };
+        if (row.status === "in_progress") {
+          onStart({ status: row.status, started_at: row.started_at });
+        }
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+/**
+ * Cancel a waiting duel room (host only, before anyone joins).
+ */
+export async function cancelPeerDuel(peerSessionId: string): Promise<void> {
+  const { error } = await supabase
+    .from("cbt_peer_sessions")
+    .update({ status: "cancelled" })
+    .eq("id", peerSessionId)
+    .eq("status", "waiting"); // Only cancel if still waiting
+
+  if (error) throw new Error(error.message);
+}
