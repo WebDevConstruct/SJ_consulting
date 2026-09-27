@@ -1,6 +1,6 @@
 /**
  * Shared utilities for SJ Consulting Edge Functions
- * Used by: cbt-start-session, cbt-submit, account-migrate, paystack-webhook
+ * Used by: auth-login, cbt-start-session, cbt-submit, account-migrate, paystack-webhook
  */
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
