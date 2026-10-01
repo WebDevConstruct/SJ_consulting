@@ -72,23 +72,52 @@ Deno.serve(async (req: Request) => {
 
   const svc = serviceClient();
 
-  // ---- Check one-attempt-per-track constraint ----
-  // (The DB UNIQUE constraint is the ground truth, but we check here for a clean error message)
-  const { data: existingAttempt } = await svc
-    .from("cbt_attempts")
-    .select("id")
+  // ---- Check CBT Premium Subscription or Free Trial ----
+  const now = new Date();
+  const { data: sub } = await svc
+    .from("subscriptions")
+    .select("id, status, access_expires_at")
     .eq("user_id", user.id)
-    .eq("track_type", track_type)
-    .eq("subject", subject)
-    .eq("exam_type", "JAMB")
+    .eq("plan_type", "cbt_premium")
+    .eq("status", "success")
+    .order("access_expires_at", { ascending: false })
+    .limit(1)
     .maybeSingle();
 
-  if (existingAttempt) {
-    return err(
-      `You have already completed a '${track_type}' attempt for ${subject}. Only one attempt per track is allowed.`,
-      409,
-      origin,
-    );
+  const isSubscribed = Boolean(
+    sub && (!sub.access_expires_at || new Date(sub.access_expires_at) > now)
+  );
+
+  // If candidate is not subscribed to CBT Premium, enforce 1 free trial attempt per track+subject
+  if (!isSubscribed) {
+    const { data: existingAttempt } = await svc
+      .from("cbt_attempts")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("track_type", track_type)
+      .eq("subject", subject)
+      .eq("exam_type", "JAMB")
+      .limit(1)
+      .maybeSingle();
+
+    if (existingAttempt) {
+      return new Response(
+        JSON.stringify({
+          error: `You have completed your free trial attempt for ${subject} (${track_type}). Subscribe to CBT Premium to unlock unlimited mock tests and full question bank access.`,
+          requires_subscription: true,
+          plan_type: "cbt_premium",
+          amount_kobo: 350000,
+          trial_exhausted: true,
+        }),
+        {
+          status: 402, // Payment Required
+          headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders(origin),
+          },
+        },
+      );
+    }
   }
 
   // ---- Check user profile exists and is aspirant ----
