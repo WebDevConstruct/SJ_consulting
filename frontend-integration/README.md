@@ -294,7 +294,46 @@ const result = await runAdmissionAnalysis({
 
 ---
 
-## 7. Setup & Environment Variables
+## 7. Authoritative Subject Combination Validator (UNILAG 2025/2026)
+
+Dimeji, use this on candidate registration, CBT track selection, and admission forms to prevent invalid JAMB combinations.
+
+```typescript
+import {
+  validateSubjectCombination,
+  getProgrammesByTrack,
+  getProgrammesByFaculty,
+  UNILAG_PROGRAMMES,
+} from "@/lib/api";
+
+// 1. Validate candidate's selected 4 UTME subjects:
+const check = validateSubjectCombination({
+  programmeSlug: "law",
+  subjects: [
+    "English Language",
+    "Literature in English",
+    "Government",
+    "Economics",
+  ],
+});
+
+if (!check.isValid) {
+  // Array of error messages to show under the form fields:
+  console.error("Errors:", check.errors);
+  // e.g. ["UNILAG Faculty of Law accepts either Economics or Commerce, but NOT both."]
+} else {
+  console.log("Combination Approved:", check.programme?.name);
+}
+
+// 2. Load allowed courses for dropdowns by track:
+const scienceCourses = getProgrammesByTrack("science");
+const commercialCourses = getProgrammesByTrack("commercial");
+const artsCourses = getProgrammesByTrack("arts");
+```
+
+---
+
+## 8. Setup & Environment Variables
 
 1. Run `npm install` to ensure `@supabase/supabase-js` is installed.
 2. Ensure `.env.local` exists in your Next.js project root:
