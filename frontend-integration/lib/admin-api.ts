@@ -323,3 +323,222 @@ export async function setUserActive(
   return data as AdminUserSummary;
 }
 
+// ============================================================
+// 4. DEPARTMENT DELIVERABLES
+// ============================================================
+
+export type DepartmentType = "research" | "media" | "programs" | "admin" | "other";
+export type DeliverableStatus = "pending" | "in_progress" | "completed" | "overdue";
+
+export interface DeliverableRecord {
+  id: string;
+  department: DepartmentType;
+  title: string;
+  description: string | null;
+  status: DeliverableStatus;
+  assigned_to: string | null;
+  due_date: string | null;
+  completed_at: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDeliverableParams {
+  department: DepartmentType;
+  title: string;
+  description?: string;
+  assigned_to?: string;
+  due_date?: string; // YYYY-MM-DD
+  status?: DeliverableStatus;
+}
+
+export interface UpdateDeliverableParams {
+  department?: DepartmentType;
+  title?: string;
+  description?: string;
+  assigned_to?: string | null;
+  due_date?: string | null;
+  status?: DeliverableStatus;
+}
+
+/**
+ * Fetch department deliverables (filterable by department and status).
+ */
+export async function getAdminDeliverables(opts?: {
+  department?: DepartmentType;
+  status?: DeliverableStatus;
+  assignedTo?: string;
+}): Promise<DeliverableRecord[]> {
+  let query = supabase
+    .from("deliverables")
+    .select("*")
+    .order("due_date", { ascending: true, nullsFirst: false });
+
+  if (opts?.department) {
+    query = query.eq("department", opts.department);
+  }
+  if (opts?.status) {
+    query = query.eq("status", opts.status);
+  }
+  if (opts?.assignedTo) {
+    query = query.eq("assigned_to", opts.assignedTo);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return (data || []) as DeliverableRecord[];
+}
+
+/**
+ * Create a new team deliverable.
+ */
+export async function createDeliverable(
+  params: CreateDeliverableParams
+): Promise<DeliverableRecord> {
+  const result = await callAdminContent("POST", {
+    resource: "deliverable",
+    ...params,
+  });
+  return result as DeliverableRecord;
+}
+
+/**
+ * Update a deliverable (status, assignee, due date, description).
+ */
+export async function updateDeliverable(
+  id: string,
+  updates: UpdateDeliverableParams
+): Promise<DeliverableRecord> {
+  const result = await callAdminContent("PUT", {
+    resource: "deliverable",
+    id,
+    ...updates,
+  });
+  return result as DeliverableRecord;
+}
+
+/**
+ * Delete a deliverable by ID.
+ */
+export async function deleteDeliverable(id: string): Promise<void> {
+  await callAdminContent("DELETE", {
+    resource: "deliverable",
+    id,
+  });
+}
+
+/**
+ * Helper: Quick-mark deliverable as completed.
+ */
+export async function markDeliverableComplete(id: string): Promise<DeliverableRecord> {
+  return updateDeliverable(id, { status: "completed" });
+}
+
+// ============================================================
+// 5. STAFF PAYROLL & DISBURSEMENTS
+// ============================================================
+
+export type PayrollStatus =
+  | "pending_approval"
+  | "approved"
+  | "processing"
+  | "paid"
+  | "rejected";
+
+export interface PayrollRecipientItem {
+  name: string;
+  bank_code: string;
+  account_number: string;
+  amount_kobo: number;
+  reason?: string;
+}
+
+export interface PayrollBatchRecord {
+  id: string;
+  created_by: string;
+  description: string;
+  total_amount_kobo: number;
+  status: PayrollStatus;
+  approved_by: string | null;
+  approved_at: string | null;
+  processed_at: string | null;
+  paystack_bulk_transfer_code: string | null;
+  recipients: PayrollRecipientItem[];
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePayrollBatchParams {
+  description: string;
+  recipients: PayrollRecipientItem[];
+  notes?: string;
+}
+
+/**
+ * Fetch payroll batches with status filter.
+ */
+export async function getPayrollBatches(opts?: {
+  status?: PayrollStatus;
+}): Promise<PayrollBatchRecord[]> {
+  let query = supabase
+    .from("payroll_batches")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (opts?.status) {
+    query = query.eq("status", opts.status);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return (data || []) as PayrollBatchRecord[];
+}
+
+/**
+ * Create a new payroll batch with recipient disbursements.
+ * Status starts as 'pending_approval'.
+ */
+export async function createPayrollBatch(
+  params: CreatePayrollBatchParams
+): Promise<PayrollBatchRecord> {
+  const result = await callAdminContent("POST", {
+    resource: "payroll",
+    ...params,
+  });
+  return result as PayrollBatchRecord;
+}
+
+/**
+ * Approve a payroll batch (Super Admin ONLY).
+ * Enforces CEO governance rule: creator cannot self-approve.
+ */
+export async function approvePayrollBatch(
+  batchId: string
+): Promise<PayrollBatchRecord> {
+  const result = await callAdminContent("PUT", {
+    resource: "payroll",
+    batch_id: batchId,
+    action: "approve",
+  });
+  return result as PayrollBatchRecord;
+}
+
+/**
+ * Reject a payroll batch (Super Admin ONLY).
+ */
+export async function rejectPayrollBatch(
+  batchId: string,
+  notes?: string
+): Promise<PayrollBatchRecord> {
+  const result = await callAdminContent("PUT", {
+    resource: "payroll",
+    batch_id: batchId,
+    action: "reject",
+    notes,
+  });
+  return result as PayrollBatchRecord;
+}
+
+

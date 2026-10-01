@@ -35,10 +35,18 @@ import {
 } from "../_shared/utils.ts";
 
 type AnnouncementCategory = "mentorship" | "unilag" | "jamb" | "accommodation";
-type Resource = "announcement" | "blog" | "user";
+type DepartmentType = "research" | "media" | "programs" | "admin" | "other";
+type DeliverableStatus = "pending" | "in_progress" | "completed" | "overdue";
+type Resource = "announcement" | "blog" | "user" | "deliverable" | "payroll";
 
 const VALID_CATEGORIES: AnnouncementCategory[] = [
   "mentorship", "unilag", "jamb", "accommodation",
+];
+const VALID_DEPARTMENTS: DepartmentType[] = [
+  "research", "media", "programs", "admin", "other",
+];
+const VALID_DELIVERABLE_STATUSES: DeliverableStatus[] = [
+  "pending", "in_progress", "completed", "overdue",
 ];
 const URL_REGEX = /^https?:\/\/.+/;
 const SLUG_REGEX = /^[a-z0-9-]+$/;
@@ -117,8 +125,8 @@ Deno.serve(async (req: Request) => {
   }
 
   const resource = body.resource as Resource | undefined;
-  if (resource !== "announcement" && resource !== "blog" && resource !== "user") {
-    return err("'resource' must be 'announcement', 'blog', or 'user'", 400, origin);
+  if (!resource || !["announcement", "blog", "user", "deliverable", "payroll"].includes(resource)) {
+    return err("'resource' must be 'announcement', 'blog', 'user', 'deliverable', or 'payroll'", 400, origin);
   }
 
   const svc = serviceClient();
@@ -128,6 +136,10 @@ Deno.serve(async (req: Request) => {
     return handleAnnouncement(method, body, user.id, svc, origin);
   } else if (resource === "blog") {
     return handleBlog(method, body, user.id, svc, origin);
+  } else if (resource === "deliverable") {
+    return handleDeliverable(method, body, user.id, svc, origin);
+  } else if (resource === "payroll") {
+    return handlePayroll(method, body, user.id, svc, origin);
   } else {
     return handleUser(method, body, user.id, svc, origin);
   }
@@ -442,3 +454,252 @@ async function handleUser(
   if (!data) return err("User not found", 404, origin);
   return ok(data, origin);
 }
+
+// ── DELIVERABLE CRUD ─────────────────────────────────────────────────────
+
+async function handleDeliverable(
+  method: "POST" | "PUT" | "DELETE",
+  body: Record<string, unknown>,
+  callerId: string,
+  svc: ReturnType<typeof serviceClient>,
+  origin: string | null,
+): Promise<Response> {
+  if (method === "DELETE") {
+    const id = trim(body.id, 36);
+    if (!id) return err("'id' is required for DELETE", 400, origin);
+
+    const { error } = await svc.from("deliverables").delete().eq("id", id);
+    if (error) {
+      console.error("admin-content deliverable DELETE error:", error.message);
+      return err("Failed to delete deliverable", 500, origin);
+    }
+    return ok({ deleted: true, id }, origin);
+  }
+
+  if (method === "POST") {
+    const department = trim(body.department, 20) as DepartmentType | null;
+    if (!department || !VALID_DEPARTMENTS.includes(department)) {
+      return err(`'department' must be one of: ${VALID_DEPARTMENTS.join(", ")}`, 400, origin);
+    }
+
+    const title = trim(body.title, 200);
+    if (!title) return err("'title' is required (max 200 characters)", 400, origin);
+
+    const description = trim(body.description, 2000);
+    const assignedTo = trim(body.assigned_to, 36);
+    const dueDate = trim(body.due_date, 20); // YYYY-MM-DD
+    const status = (trim(body.status, 20) as DeliverableStatus) || "pending";
+
+    if (!VALID_DELIVERABLE_STATUSES.includes(status)) {
+      return err(`'status' must be one of: ${VALID_DELIVERABLE_STATUSES.join(", ")}`, 400, origin);
+    }
+
+    const { data, error } = await svc
+      .from("deliverables")
+      .insert({
+        department,
+        title,
+        description,
+        assigned_to: assignedTo || null,
+        due_date: dueDate || null,
+        status,
+        created_by: callerId,
+        completed_at: status === "completed" ? new Date().toISOString() : null,
+      })
+      .select("id, department, title, description, status, assigned_to, due_date, completed_at, created_by, created_at, updated_at")
+      .single();
+
+    if (error) {
+      console.error("admin-content deliverable INSERT error:", error.message);
+      return err("Failed to create deliverable", 500, origin);
+    }
+
+    return ok(data, origin);
+  }
+
+  // PUT
+  const id = trim(body.id, 36);
+  if (!id) return err("'id' is required for UPDATE", 400, origin);
+
+  const updates: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (body.title !== undefined) {
+    const t = trim(body.title, 200);
+    if (!t) return err("Title cannot be empty", 400, origin);
+    updates.title = t;
+  }
+  if (body.description !== undefined) {
+    updates.description = trim(body.description, 2000);
+  }
+  if (body.department !== undefined) {
+    const d = trim(body.department, 20) as DepartmentType;
+    if (!VALID_DEPARTMENTS.includes(d)) {
+      return err(`Invalid department. Must be: ${VALID_DEPARTMENTS.join(", ")}`, 400, origin);
+    }
+    updates.department = d;
+  }
+  if (body.assigned_to !== undefined) {
+    updates.assigned_to = trim(body.assigned_to, 36) || null;
+  }
+  if (body.due_date !== undefined) {
+    updates.due_date = trim(body.due_date, 20) || null;
+  }
+  if (body.status !== undefined) {
+    const s = trim(body.status, 20) as DeliverableStatus;
+    if (!VALID_DELIVERABLE_STATUSES.includes(s)) {
+      return err(`Invalid status. Must be: ${VALID_DELIVERABLE_STATUSES.join(", ")}`, 400, origin);
+    }
+    updates.status = s;
+    if (s === "completed") {
+      updates.completed_at = new Date().toISOString();
+    } else {
+      updates.completed_at = null;
+    }
+  }
+
+  const { data, error } = await svc
+    .from("deliverables")
+    .update(updates)
+    .eq("id", id)
+    .select("id, department, title, description, status, assigned_to, due_date, completed_at, created_by, created_at, updated_at")
+    .single();
+
+  if (error) {
+    console.error("admin-content deliverable UPDATE error:", error.message);
+    return err("Failed to update deliverable", 500, origin);
+  }
+
+  return ok(data, origin);
+}
+
+// ── PAYROLL CRUD & APPROVAL ──────────────────────────────────────────────
+
+interface PayrollRecipient {
+  name: string;
+  bank_code: string;
+  account_number: string;
+  amount_kobo: number;
+  reason?: string;
+}
+
+async function handlePayroll(
+  method: "POST" | "PUT" | "DELETE",
+  body: Record<string, unknown>,
+  callerId: string,
+  svc: ReturnType<typeof serviceClient>,
+  origin: string | null,
+): Promise<Response> {
+  if (method === "POST") {
+    const description = trim(body.description, 300);
+    if (!description) return err("'description' is required (e.g. 'September 2026 Tutor Stipends')", 400, origin);
+
+    const recipients = body.recipients as PayrollRecipient[] | undefined;
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      return err("'recipients' must be a non-empty array of recipient objects", 400, origin);
+    }
+
+    let totalKobo = 0;
+    for (let i = 0; i < recipients.length; i++) {
+      const r = recipients[i];
+      if (!r.name || !r.bank_code || !r.account_number || typeof r.amount_kobo !== "number" || r.amount_kobo <= 0) {
+        return err(`Recipient #${i + 1} has invalid fields. Each recipient requires name, bank_code, account_number, and positive amount_kobo`, 400, origin);
+      }
+      totalKobo += Math.round(r.amount_kobo);
+    }
+
+    const { data, error } = await svc
+      .from("payroll_batches")
+      .insert({
+        created_by: callerId,
+        description,
+        total_amount_kobo: totalKobo,
+        status: "pending_approval",
+        recipients,
+        notes: trim(body.notes, 500),
+      })
+      .select("id, description, total_amount_kobo, status, recipients, notes, created_by, created_at")
+      .single();
+
+    if (error) {
+      console.error("admin-content payroll INSERT error:", error.message);
+      return err("Failed to create payroll batch", 500, origin);
+    }
+
+    return ok(data, origin);
+  }
+
+  if (method === "PUT") {
+    // Action: 'approve' or 'reject'
+    const batchId = trim(body.batch_id, 36);
+    if (!batchId) return err("'batch_id' is required", 400, origin);
+
+    const action = trim(body.action, 20);
+    if (action !== "approve" && action !== "reject") {
+      return err("'action' must be 'approve' or 'reject'", 400, origin);
+    }
+
+    // Role check: Only super_admin can approve/reject payroll
+    const { data: callerProfile } = await svc
+      .from("profiles")
+      .select("user_role")
+      .eq("id", callerId)
+      .eq("is_active", true)
+      .single();
+
+    if (callerProfile?.user_role !== "super_admin") {
+      return err("Forbidden: Only super_admin can approve or reject payroll batches", 403, origin);
+    }
+
+    // Fetch batch to verify state and enforce no_self_approval
+    const { data: batch, error: batchErr } = await svc
+      .from("payroll_batches")
+      .select("id, created_by, status, total_amount_kobo")
+      .eq("id", batchId)
+      .single();
+
+    if (batchErr || !batch) return err("Payroll batch not found", 404, origin);
+
+    if (batch.status !== "pending_approval") {
+      return err(`Cannot modify payroll batch with status '${batch.status}'`, 409, origin);
+    }
+
+    // CEO Governance Rule: no self approval!
+    if (batch.created_by === callerId) {
+      return err("CEO Governance Rule: You cannot approve a payroll batch you created yourself. Another super_admin must review and approve.", 403, origin);
+    }
+
+    const updates: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (action === "approve") {
+      updates.status = "approved";
+      updates.approved_by = callerId;
+      updates.approved_at = new Date().toISOString();
+    } else {
+      updates.status = "rejected";
+      if (body.notes) {
+        updates.notes = trim(body.notes, 500);
+      }
+    }
+
+    const { data, error } = await svc
+      .from("payroll_batches")
+      .update(updates)
+      .eq("id", batchId)
+      .select("id, description, total_amount_kobo, status, approved_by, approved_at, processed_at, created_by, created_at, updated_at")
+      .single();
+
+    if (error) {
+      console.error("admin-content payroll UPDATE error:", error.message);
+      return err("Failed to update payroll batch", 500, origin);
+    }
+
+    return ok(data, origin);
+  }
+
+  return err("Method not allowed for payroll. Use POST to create batch or PUT to approve/reject.", 405, origin);
+}
+

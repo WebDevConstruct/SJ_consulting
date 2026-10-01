@@ -310,6 +310,79 @@ await setUserRole("user-uuid", "admin"); // Promotes user to admin
 await setUserRole("user-uuid", "user");  // Demotes back to candidate
 ```
 
+### 5.4 Department Deliverables & Task Milestones:
+Track operational and academic tasks across departments (`research`, `media`, `programs`, `admin`, `other`):
+```typescript
+import {
+  getAdminDeliverables,
+  createDeliverable,
+  updateDeliverable,
+  markDeliverableComplete,
+  deleteDeliverable,
+} from "@/lib/admin-api";
+
+// 1. Fetch team deliverables (filterable by department and status):
+const tasks = await getAdminDeliverables({
+  department: "programs",
+  status: "pending", // "pending" | "in_progress" | "completed" | "overdue"
+});
+
+// 2. Create new deliverable:
+const newTask = await createDeliverable({
+  department: "research",
+  title: "Compile 2025/2026 Direct Entry Cut-Off Points",
+  description: "Cross-check with UNILAG admissions office bulletin",
+  due_date: "2026-10-15",
+  assigned_to: "staff-uuid-here",
+});
+
+// 3. Mark complete:
+await markDeliverableComplete(newTask.id);
+```
+
+### 5.5 Staff Payroll & Paystack Disbursements:
+Manage batch disbursements to tutors, researchers, and operations staff.
+**CEO Governance Rule Enforced**: The creator of a payroll batch cannot approve it—a different `super_admin` must review and authorize.
+
+```typescript
+import {
+  getPayrollBatches,
+  createPayrollBatch,
+  approvePayrollBatch,
+  rejectPayrollBatch,
+} from "@/lib/admin-api";
+
+// 1. Admin/Super Admin creates a disbursement batch:
+const batch = await createPayrollBatch({
+  description: "October 2026 Tutor Stipends & Question Moderation",
+  recipients: [
+    {
+      name: "Tunde Bakare",
+      bank_code: "058", // GTBank
+      account_number: "0123456789",
+      amount_kobo: 7500000, // 75,000 NGN
+      reason: "Biology Question Curation (Batch 1)",
+    },
+    {
+      name: "Chioma Okonjo",
+      bank_code: "044", // Access Bank
+      account_number: "0987654321",
+      amount_kobo: 6000000, // 60,000 NGN
+      reason: "Economics Mock Review",
+    },
+  ],
+  notes: "Verified against completed deliverables",
+});
+
+// 2. Super Admin reviews & approves (must NOT be the creator):
+try {
+  await approvePayrollBatch(batch.id);
+  alert("Payroll batch approved for disbursement!");
+} catch (err: any) {
+  alert(err.message); // e.g. "CEO Governance Rule: You cannot approve a payroll batch you created yourself."
+}
+```
+
 ---
 
 ## 6. UNILAG Admission Analysis Engine
