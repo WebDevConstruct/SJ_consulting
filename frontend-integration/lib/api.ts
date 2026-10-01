@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase";
+import { supabase } from "./supabase";
 
 // ============================================================
 // 1. UNILAG ADMISSION ANALYSIS ENGINE

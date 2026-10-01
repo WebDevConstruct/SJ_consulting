@@ -11,7 +11,7 @@
  * NEVER import this file in customer-facing pages.
  */
 
-import { supabase } from "@/lib/supabase";
+import { supabase } from "./supabase";
 
 // ── Shared utility ────────────────────────────────────────────────────────
 

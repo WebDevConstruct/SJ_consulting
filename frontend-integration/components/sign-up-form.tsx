@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { supabase } from "@/lib/supabase";
+import { useRouter } from "next/navigation";
+import { signUpCandidate, verifyEmailOtp } from "@/lib/api";
 import { AuthLayout } from "@/components/forms/auth-layout";
 import { TextField } from "@/components/forms/text-field";
 import { SelectField } from "@/components/forms/select-field";
@@ -18,10 +19,14 @@ const YEAR_OPTIONS = [
 ];
 
 export function SignUpForm() {
+  const router = useRouter();
   const [profile, setProfile] = useState<UserProfile>("aspirant");
   const [writtenJamb, setWrittenJamb] = useState<"yes" | "no">("no");
   const [submitted, setSubmitted] = useState(false);
+  const [submittedEmail, setSubmittedEmail] = useState("");
+  const [otpCode, setOtpCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -30,51 +35,111 @@ export function SignUpForm() {
     setLoading(true);
 
     const formData = new FormData(event.currentTarget);
-    const email = formData.get("email") as string;
+    const email = (formData.get("email") as string).trim();
     const password = formData.get("password") as string;
-    const name = formData.get("name") as string;
+    const name = (formData.get("name") as string).trim();
+    const username = (formData.get("username") as string)?.trim() || undefined;
     const age = formData.get("age");
     const phone = formData.get("phone") as string;
     const user_profile = profile;
     const written_jamb = writtenJamb;
     const year = formData.get("year");
 
-    const { error: signUpError } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          name,
-          age: age ? parseInt(age as string, 10) : null,
-          phone,
-          user_profile,
-          written_jamb: user_profile === "aspirant" ? written_jamb : null,
-          year: user_profile === "undergraduate" ? parseInt(year as string, 10) : null,
-        },
-      },
-    });
+    try {
+      await signUpCandidate({
+        email,
+        password,
+        full_name: name,
+        username,
+        phone,
+        age: age ? parseInt(age as string, 10) : undefined,
+        user_profile,
+        written_jamb: user_profile === "aspirant" ? written_jamb : undefined,
+        year: user_profile === "undergraduate" && year ? parseInt(year as string, 10) : undefined,
+      });
 
-    setLoading(false);
-    if (signUpError) {
-      setError(signUpError.message);
-      return;
+      setSubmittedEmail(email);
+      setSubmitted(true);
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to create account. Please check your details.");
+    } finally {
+      setLoading(false);
     }
+  };
 
-    setSubmitted(true);
+  const handleVerifyOtp = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!otpCode.trim()) return;
+
+    setError(null);
+    setVerifyingOtp(true);
+
+    try {
+      await verifyEmailOtp({
+        email: submittedEmail,
+        token: otpCode.trim(),
+        type: "signup",
+      });
+      router.push("/");
+    } catch (err: any) {
+      setError(err?.message ?? "Invalid or expired 6-digit code. Please try again.");
+    } finally {
+      setVerifyingOtp(false);
+    }
   };
 
   if (submitted) {
     return (
       <AuthLayout
         title="Check your email"
-        subtitle="We've sent a verification link to your email address."
+        subtitle={`We sent a verification code to ${submittedEmail}.`}
         footerText="Already verified?"
         footerLinkHref="/signin"
         footerLinkLabel="Sign in"
       >
-        <p className="text-[14.5px] leading-relaxed text-current/65">
-          Please check your inbox and click the confirmation link to activate your account.
-        </p>
+        <div className="flex flex-col gap-5">
+          <p className="text-[14px] leading-relaxed text-current/65">
+            Click the link in the confirmation email, or enter your 6-digit verification code below to immediately activate your account.
+          </p>
+
+          <form onSubmit={handleVerifyOtp} className="flex flex-col gap-4">
+            <TextField
+              label="6-Digit Verification Code"
+              name="otp"
+              type="text"
+              placeholder="123456"
+              value={otpCode}
+              onChange={(e: any) => setOtpCode(e.target.value)}
+              maxLength={6}
+              required
+            />
+
+            {error && (
+              <div className="rounded-sm border border-red-500/30 bg-red-500/10 p-3 text-[13.5px] text-red-400">
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={verifyingOtp || otpCode.length < 6}
+              className="focus-gold rounded-sm border border-gold-400 bg-gold-metal-soft px-6 py-3.5 text-[14.5px] font-semibold text-ink shadow-gold transition-transform hover:scale-[1.01] disabled:opacity-50"
+            >
+              {verifyingOtp ? "Verifying..." : "Verify & Continue"}
+            </button>
+          </form>
+
+          <button
+            type="button"
+            onClick={() => {
+              setSubmitted(false);
+              setError(null);
+            }}
+            className="text-[13px] text-current/55 hover:text-gold-500 self-center"
+          >
+            ← Back to sign up details
+          </button>
+        </div>
       </AuthLayout>
     );
   }
@@ -95,6 +160,14 @@ export function SignUpForm() {
           autoComplete="name"
           placeholder="e.g. Feranmi Adebayo"
           required
+        />
+
+        <TextField
+          label="Username (Optional)"
+          name="username"
+          type="text"
+          autoComplete="username"
+          placeholder="e.g. feranmi_dev (used for leaderboard & duels)"
         />
 
         <div className="grid grid-cols-2 gap-4">

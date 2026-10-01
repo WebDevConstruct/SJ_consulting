@@ -383,12 +383,193 @@ const artsCourses = getProgrammesByTrack("arts");
 
 ---
 
-## 8. Setup & Environment Variables
+## 9. CBT Exam Engine (Timed Practice & Real Exam)
+
+Server-authoritative examination lifecycle. Correct answers are kept securely on the server and never sent to the candidate browser before grading.
+
+### 9.1 Starting an Exam Session:
+```typescript
+import { startCBTSession } from "@/lib/api";
+
+// Start a 30-minute timed exam session:
+const { session, questions } = await startCBTSession({
+  subject: "economics", // "accounts" | "biology" | "economics" | "commerce"
+  track_type: "subject", // "subject" | "topic" | "combination"
+  mode: "solo", // "solo" | "peer"
+});
+
+console.log("Session ID:", session.id);
+console.log("Total Questions:", session.total_questions);
+console.log("Time Limit (Seconds):", session.time_limit_seconds); // 1800s (30 mins)
+
+// Each question object contains:
+// - id: question UUID
+// - question_number: 1, 2, 3...
+// - context_text: optional comprehension passage or preamble
+// - question_text: question prompt
+// - options: { A: "...", B: "...", C: "...", D: "..." }
+// - has_diagram: boolean
+// - diagram_url: optional image URL if has_diagram is true
+```
+
+### 9.2 Submitting Answers & Auto-Grading:
+```typescript
+import { submitCBTSession } from "@/lib/api";
+
+const result = await submitCBTSession({
+  session_id: session.id,
+  answers: {
+    "question-uuid-1": "B",
+    "question-uuid-2": "C",
+    "question-uuid-3": "A",
+  },
+});
+
+console.log("Score:", result.score, "/", result.total_questions);
+console.log("Percentage:", result.percentage, "%");
+console.log("Points Earned:", result.points_earned); // Automatically increments user's leaderboard score!
+console.log("Time Spent (seconds):", result.time_spent_seconds);
+```
+
+### 9.3 Fetching Past CBT Attempts:
+```typescript
+import { getCBTAttempts } from "@/lib/api";
+
+const history = await getCBTAttempts();
+// Returns array of past attempts with score, percentage, subject, and timestamp
+```
+
+---
+
+## 10. Candidate Profile & Onboarding
+
+```typescript
+import { getUserProfile, updateUserProfile } from "@/lib/api";
+
+// 1. Fetch current user profile:
+const profile = await getUserProfile();
+console.log("Profile:", profile.username, profile.user_type, profile.leaderboard_score);
+
+// 2. Update candidate settings / UTME target:
+await updateUserProfile({
+  full_name: "Feranmi Adebayo",
+  target_score: 295,
+  desired_programme: "computer-science",
+  jamb_subjects: ["English Language", "Mathematics", "Physics", "Chemistry"],
+});
+```
+
+---
+
+## 11. Account Migration (Aspirant → Undergraduate)
+
+When a candidate successfully secures admission into UNILAG, they can convert their account into an undergraduate account to access GST courses and departmental resources.
+
+```typescript
+import { migrateAccount } from "@/lib/api";
+
+try {
+  // Requires user password re-confirmation for security
+  await migrateAccount({
+    password: "userPasswordHere",
+    unilag_year: 1, // 1 or 2
+  });
+  // User is automatically signed out and prompted to sign in with their new undergraduate role!
+  router.push("/signin?reason=migrated");
+} catch (err: any) {
+  alert(err.message);
+}
+```
+
+---
+
+## 12. Subscriptions & Paystack Checkout
+
+Candidates can unlock full CBT question banks or GST university courses via Paystack.
+
+### 12.1 Check Subscription Status:
+```typescript
+import { hasActiveSubscription, getUserSubscriptions } from "@/lib/api";
+
+// Check if candidate has active CBT Premium:
+const isCBTPremium = await hasActiveSubscription("cbt_premium");
+
+// Check if undergraduate has active GST Year 1 package:
+const hasGSTAccess = await hasActiveSubscription("gst_year1");
+```
+
+### 12.2 Triggering Paystack Inline Popup:
+Include Paystack inline script in your layout or use `react-paystack`:
+```typescript
+// Example using standard PaystackPop:
+function payWithPaystack({ email, amountKobo, planType, userId }: {
+  email: string;
+  amountKobo: number;
+  planType: "cbt_premium" | "gst_year1" | "gst_year2";
+  userId: string;
+}) {
+  const handler = (window as any).PaystackPop.setup({
+    key: process.env.NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY,
+    email: email,
+    amount: amountKobo, // e.g. 500000 kobo = 5,000 NGN
+    currency: "NGN",
+    metadata: {
+      user_id: userId,
+      plan_type: planType,
+    },
+    callback: function (response: any) {
+      // Payment successful!
+      // The Supabase paystack-webhook Edge Function automatically activates the subscription in the background.
+      alert("Payment successful! Reference: " + response.reference);
+      window.location.reload();
+    },
+    onClose: function () {
+      console.log("Transaction window closed");
+    },
+  });
+  handler.openIframe();
+}
+```
+
+---
+
+## 13. Realtime Peer Duel Live Score Tracking
+
+When a 1v1 duel is in progress, subscribe to live score changes so both candidates see when an opponent submits and who wins:
+
+```typescript
+import { subscribeToPeerDuelScore } from "@/lib/api";
+
+const unsubscribeScore = subscribeToPeerDuelScore(peerSessionId, (update) => {
+  console.log("Host Score:", update.host_score);
+  console.log("Challenger Score:", update.challenger_score);
+  
+  if (update.status === "completed") {
+    // Both submitted! Announce winner
+    if (update.winner_user_id === currentUserId) {
+      alert("Victory! You won the duel and earned +50 bonus points!");
+    } else if (update.winner_user_id === null) {
+      alert("It's a draw! Well played.");
+    } else {
+      alert("Duel ended. Better luck next time!");
+    }
+  }
+});
+
+// Cleanup on page unmount:
+// unsubscribeScore();
+```
+
+---
+
+## 14. Setup & Environment Variables
 
 1. Run `npm install` to ensure `@supabase/supabase-js` is installed.
 2. Ensure `.env.local` exists in your Next.js project root:
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://ahzdspdmjptxkilquhqa.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
+NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY=pk_test_...
 ```
 3. Start the dev server: `npm run dev`.
+
