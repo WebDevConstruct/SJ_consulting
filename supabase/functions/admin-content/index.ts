@@ -34,10 +34,8 @@ import {
   serviceClient,
 } from "../_shared/utils.ts";
 
-// ── Types & Constants ────────────────────────────────────────────────────
-
 type AnnouncementCategory = "mentorship" | "unilag" | "jamb" | "accommodation";
-type Resource = "announcement" | "blog";
+type Resource = "announcement" | "blog" | "user";
 
 const VALID_CATEGORIES: AnnouncementCategory[] = [
   "mentorship", "unilag", "jamb", "accommodation",
@@ -119,8 +117,8 @@ Deno.serve(async (req: Request) => {
   }
 
   const resource = body.resource as Resource | undefined;
-  if (resource !== "announcement" && resource !== "blog") {
-    return err("'resource' must be 'announcement' or 'blog'", 400, origin);
+  if (resource !== "announcement" && resource !== "blog" && resource !== "user") {
+    return err("'resource' must be 'announcement', 'blog', or 'user'", 400, origin);
   }
 
   const svc = serviceClient();
@@ -128,8 +126,10 @@ Deno.serve(async (req: Request) => {
 
   if (resource === "announcement") {
     return handleAnnouncement(method, body, user.id, svc, origin);
-  } else {
+  } else if (resource === "blog") {
     return handleBlog(method, body, user.id, svc, origin);
+  } else {
+    return handleUser(method, body, user.id, svc, origin);
   }
 });
 
@@ -364,5 +364,81 @@ async function handleBlog(
     return err("Failed to update blog post", 500, origin);
   }
   if (!data) return err("Blog post not found", 404, origin);
+  return ok(data, origin);
+}
+
+// ── USER MANAGEMENT (ROLE & SUSPENSION) ──────────────────────────────────
+
+async function handleUser(
+  method: "POST" | "PUT" | "DELETE",
+  body: Record<string, unknown>,
+  callerId: string,
+  svc: ReturnType<typeof serviceClient>,
+  origin: string | null,
+): Promise<Response> {
+  if (method !== "PUT") {
+    return err("Method not allowed for user resource. Use PUT.", 405, origin);
+  }
+
+  const targetUserId = trim(body.user_id, 36);
+  if (!targetUserId) {
+    return err("'user_id' is required", 400, origin);
+  }
+
+  const updates: Record<string, unknown> = {};
+
+  // Check if role update is requested
+  if (body.user_role !== undefined) {
+    const newRole = trim(body.user_role, 20);
+    if (!newRole || !["user", "admin", "super_admin"].includes(newRole)) {
+      return err("'user_role' must be 'user', 'admin', or 'super_admin'", 400, origin);
+    }
+
+    // Role elevation requires super_admin
+    const { data: callerProfile } = await svc
+      .from("profiles")
+      .select("user_role")
+      .eq("id", callerId)
+      .eq("is_active", true)
+      .single();
+
+    if (callerProfile?.user_role !== "super_admin") {
+      return err("Forbidden: Only super_admin can modify user roles", 403, origin);
+    }
+
+    // Prevent demoting yourself from super_admin if you are the caller
+    if (callerId === targetUserId && newRole !== "super_admin") {
+      return err("Cannot demote your own super_admin account", 400, origin);
+    }
+
+    updates.user_role = newRole;
+  }
+
+  // Check if is_active is requested (suspend/reactivate)
+  if (typeof body.is_active === "boolean") {
+    // Cannot deactivate yourself
+    if (callerId === targetUserId && !body.is_active) {
+      return err("Cannot deactivate your own account", 400, origin);
+    }
+    updates.is_active = body.is_active;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return err("No valid fields provided to update ('user_role' or 'is_active')", 400, origin);
+  }
+
+  const { data, error } = await svc
+    .from("profiles")
+    .update(updates)
+    .eq("id", targetUserId)
+    .select("id, username, full_name, user_role, user_type, is_active, updated_at")
+    .single();
+
+  if (error) {
+    console.error("admin-content user update error:", error.message);
+    return err("Failed to update user profile", 500, origin);
+  }
+
+  if (!data) return err("User not found", 404, origin);
   return ok(data, origin);
 }
