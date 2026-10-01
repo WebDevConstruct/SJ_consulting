@@ -391,8 +391,83 @@ export async function login(params: LoginParams): Promise<LoginResult> {
     throw new Error(body?.error ?? "Login failed. Please try again.");
   }
 
+  // Automatically sync session with supabase client
+  if (body?.session?.access_token && body?.session?.refresh_token) {
+    await supabase.auth.setSession({
+      access_token: body.session.access_token,
+      refresh_token: body.session.refresh_token,
+    });
+  }
+
   return body as LoginResult;
 }
+
+/**
+ * Send a password reset link to user's registered email.
+ */
+export async function sendPasswordResetEmail(
+  email: string,
+  redirectTo?: string
+): Promise<void> {
+  const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+    redirectTo:
+      redirectTo ??
+      (typeof window !== "undefined"
+        ? `${window.location.origin}/reset-password`
+        : undefined),
+  });
+  if (error) throw new Error(error.message);
+}
+
+/**
+ * Update authenticated user's password (called on the password reset callback page).
+ */
+export async function updatePassword(newPassword: string): Promise<void> {
+  const { error } = await supabase.auth.updateUser({
+    password: newPassword,
+  });
+  if (error) throw new Error(error.message);
+}
+
+/**
+ * Verify a 6-digit email OTP (e.g. signup email confirmation or recovery).
+ */
+export async function verifyEmailOtp(params: {
+  email: string;
+  token: string;
+  type?: "signup" | "recovery" | "magiclink" | "invite";
+}): Promise<{ session: unknown; user: unknown }> {
+  const { data, error } = await supabase.auth.verifyOtp({
+    email: params.email.trim(),
+    token: params.token.trim(),
+    type: params.type ?? "signup",
+  });
+  if (error) throw new Error(error.message);
+  return { session: data.session, user: data.user };
+}
+
+/**
+ * Resend email confirmation token or OTP code.
+ */
+export async function resendEmailOtp(
+  email: string,
+  type: "signup" | "recovery" = "signup"
+): Promise<void> {
+  const { error } = await supabase.auth.resend({
+    email: email.trim(),
+    type,
+  });
+  if (error) throw new Error(error.message);
+}
+
+/**
+ * Sign out active user and clear session tokens.
+ */
+export async function signOut(): Promise<void> {
+  const { error } = await supabase.auth.signOut();
+  if (error) throw new Error(error.message);
+}
+
 
 // ============================================================
 // 7. PEER MATCHMAKING
@@ -631,3 +706,11 @@ export type {
   ProgrammeRequirement,
   SubjectValidationResult,
 } from "./subject-validator";
+
+// ============================================================
+// 9. SESSION INACTIVITY AUTO-LOGOUT HOOK
+// ============================================================
+
+export { useIdleTimeout } from "./use-idle-timeout";
+export type { IdleTimeoutOptions } from "./use-idle-timeout";
+
