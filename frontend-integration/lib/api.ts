@@ -714,3 +714,374 @@ export type {
 export { useIdleTimeout } from "./use-idle-timeout";
 export type { IdleTimeoutOptions } from "./use-idle-timeout";
 
+// ============================================================
+// 10. CBT SESSION ENGINE (Solo & Timed Practice)
+// ============================================================
+
+export type CBTSubject = "accounts" | "biology" | "economics" | "commerce";
+export type CBTTrackType = "subject" | "topic" | "combination";
+
+export interface StartCBTSessionParams {
+  subject: CBTSubject;
+  track_type: CBTTrackType;
+  topic?: string;
+  mode?: "solo" | "peer";
+}
+
+export interface CBTSessionMeta {
+  id: string;
+  started_at: string;
+  expires_at: string;
+  total_questions: number;
+  time_limit_seconds: number;
+}
+
+export interface StartCBTSessionResult {
+  session: CBTSessionMeta;
+  questions: CBTQuestion[];
+}
+
+/**
+ * Start a server-authoritative CBT session.
+ * Question options and IDs are provided safely without correct answers.
+ */
+export async function startCBTSession(
+  params: StartCBTSessionParams
+): Promise<StartCBTSessionResult> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+
+  const session = (await supabase.auth.getSession()).data.session;
+  if (!session) throw new Error("Must be logged in to start CBT session");
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/cbt-start-session`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify(params),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body?.error ?? "Failed to start CBT session");
+  }
+
+  return body as StartCBTSessionResult;
+}
+
+export interface SubmitCBTSessionParams {
+  session_id: string;
+  answers: Record<string, "A" | "B" | "C" | "D">;
+}
+
+export interface SubmitCBTSessionResult {
+  score: number;
+  total_questions: number;
+  percentage: number;
+  time_spent_seconds: number;
+  points_earned: number;
+}
+
+/**
+ * Submit candidate answers to be graded server-side.
+ * Updates leaderboard score and records candidate attempt.
+ */
+export async function submitCBTSession(
+  params: SubmitCBTSessionParams
+): Promise<SubmitCBTSessionResult> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+
+  const session = (await supabase.auth.getSession()).data.session;
+  if (!session) throw new Error("Must be logged in to submit CBT session");
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/cbt-submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify(params),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body?.error ?? "Failed to submit CBT exam");
+  }
+
+  return body as SubmitCBTSessionResult;
+}
+
+/**
+ * Fetch candidate's past CBT attempts history.
+ */
+export async function getCBTAttempts(): Promise<RecentAttempt[]> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Must be logged in");
+
+  const { data, error } = await supabase
+    .from("cbt_attempts")
+    .select("id, subject, track_type, mode, exam_type, total_questions, score, time_spent_seconds, created_at")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(error.message);
+
+  return (data || []).map((row) => ({
+    id: row.id,
+    subject: row.subject,
+    track_type: row.track_type,
+    mode: row.mode,
+    exam_type: row.exam_type,
+    total_questions: row.total_questions,
+    score: row.score,
+    score_pct: row.total_questions > 0 ? Math.round((row.score / row.total_questions) * 100) : 0,
+    time_spent_seconds: row.time_spent_seconds,
+    attempted_at: row.created_at,
+  }));
+}
+
+// ============================================================
+// 11. CANDIDATE PROFILE & ONBOARDING
+// ============================================================
+
+export interface UserProfileRecord {
+  id: string;
+  username: string;
+  full_name: string;
+  avatar_url: string | null;
+  user_type: "aspirant" | "undergraduate";
+  user_role: "user" | "tutor" | "admin" | "super_admin";
+  phone: string | null;
+  age: number | null;
+  theme: "light" | "dark" | "system";
+  jamb_subjects: string[] | null;
+  has_written_jamb: boolean | null;
+  unilag_year: number | null;
+  target_score: number | null;
+  desired_programme: string | null;
+  leaderboard_score: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getUserProfile(): Promise<UserProfileRecord> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Not authenticated");
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("id", user.id)
+    .single();
+
+  if (error) throw new Error(error.message);
+  return data as UserProfileRecord;
+}
+
+export interface UpdateUserProfileParams {
+  full_name?: string;
+  phone?: string;
+  age?: number;
+  avatar_url?: string;
+  theme?: "light" | "dark" | "system";
+  target_score?: number;
+  desired_programme?: string;
+  jamb_subjects?: string[];
+}
+
+export async function updateUserProfile(
+  updates: UpdateUserProfileParams
+): Promise<UserProfileRecord> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Not authenticated");
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .update({
+      ...updates,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", user.id)
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
+  return data as UserProfileRecord;
+}
+
+export interface SignUpCandidateParams {
+  email: string;
+  password: string;
+  full_name: string;
+  username?: string;
+  phone?: string;
+  age?: number;
+  user_profile?: "aspirant" | "undergraduate";
+  written_jamb?: "yes" | "no";
+  year?: number;
+  target_score?: number;
+  desired_programme?: string;
+  jamb_subjects?: string[];
+}
+
+/**
+ * Comprehensive registration wrapper for aspirants and undergraduates.
+ */
+export async function signUpCandidate(params: SignUpCandidateParams) {
+  const profileType = params.user_profile ?? "aspirant";
+  const { data, error } = await supabase.auth.signUp({
+    email: params.email.trim(),
+    password: params.password,
+    options: {
+      data: {
+        name: params.full_name.trim(),
+        username: params.username?.trim() || undefined,
+        phone: params.phone?.trim() || null,
+        age: params.age ? Number(params.age) : null,
+        user_profile: profileType,
+        written_jamb: profileType === "aspirant" ? params.written_jamb ?? "no" : null,
+        year: profileType === "undergraduate" ? params.year ?? 1 : null,
+        target_score: params.target_score ?? null,
+        desired_programme: params.desired_programme ?? null,
+        jamb_subjects: params.jamb_subjects ?? null,
+      },
+    },
+  });
+
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+// ============================================================
+// 12. ACCOUNT MIGRATION (Aspirant -> Undergraduate)
+// ============================================================
+
+export interface MigrateAccountParams {
+  password: string;
+  unilag_year: 1 | 2;
+}
+
+/**
+ * Safely migrates an aspirant account to undergraduate once admitted.
+ * Requires password confirmation and signs user out of all sessions.
+ */
+export async function migrateAccount(
+  params: MigrateAccountParams
+): Promise<{ message: string }> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+
+  const session = (await supabase.auth.getSession()).data.session;
+  if (!session) throw new Error("Must be logged in to migrate account");
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/account-migrate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify(params),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body?.error ?? "Account migration failed");
+  }
+
+  await supabase.auth.signOut();
+  return body as { message: string };
+}
+
+// ============================================================
+// 13. SUBSCRIPTIONS & PAYSTACK
+// ============================================================
+
+export interface SubscriptionRecord {
+  id: string;
+  plan_type: "cbt_premium" | "gst_year1" | "gst_year2" | string;
+  paystack_reference: string;
+  status: "pending" | "success" | "failed" | "abandoned";
+  amount_kobo: number;
+  access_expires_at: string | null;
+  created_at: string;
+}
+
+/**
+ * Get candidate subscriptions.
+ */
+export async function getUserSubscriptions(): Promise<SubscriptionRecord[]> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Not authenticated");
+
+  const { data, error } = await supabase
+    .from("subscriptions")
+    .select("id, plan_type, paystack_reference, status, amount_kobo, access_expires_at, created_at")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(error.message);
+  return (data || []) as SubscriptionRecord[];
+}
+
+/**
+ * Check if user has an active, unexpired subscription for a plan.
+ */
+export async function hasActiveSubscription(
+  planType: "cbt_premium" | "gst_year1" | "gst_year2"
+): Promise<boolean> {
+  const subscriptions = await getUserSubscriptions();
+  const now = new Date();
+
+  return subscriptions.some((sub) => {
+    if (sub.status !== "success" || sub.plan_type !== planType) return false;
+    if (!sub.access_expires_at) return true;
+    return new Date(sub.access_expires_at) > now;
+  });
+}
+
+// ============================================================
+// 14. REALTIME PEER DUEL LIVE TRACKING
+// ============================================================
+
+export function subscribeToPeerDuelScore(
+  peerSessionId: string,
+  onUpdate: (data: {
+    host_score: number | null;
+    challenger_score: number | null;
+    status: string;
+    winner_user_id: string | null;
+  }) => void
+): () => void {
+  const channel = supabase
+    .channel(`duel-score-${peerSessionId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "UPDATE",
+        schema: "public",
+        table: "cbt_peer_sessions",
+        filter: `id=eq.${peerSessionId}`,
+      },
+      (payload: {
+        new: {
+          host_score: number | null;
+          challenger_score: number | null;
+          status: string;
+          winner_user_id: string | null;
+        };
+      }) => {
+        onUpdate(payload.new);
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+
