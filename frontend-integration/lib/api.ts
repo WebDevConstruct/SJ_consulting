@@ -616,3 +616,18 @@ export async function cancelPeerDuel(peerSessionId: string): Promise<void> {
 
   if (error) throw new Error(error.message);
 }
+
+// ============================================================
+// 8. SUBJECT COMBINATION VALIDATOR
+// ============================================================
+
+export {
+  validateSubjectCombination,
+  getProgrammesByTrack,
+  getProgrammesByFaculty,
+  UNILAG_PROGRAMMES,
+} from "./subject-validator";
+export type {
+  ProgrammeRequirement,
+  SubjectValidationResult,
+} from "./subject-validator";
