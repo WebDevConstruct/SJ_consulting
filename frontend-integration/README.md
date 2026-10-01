@@ -17,16 +17,13 @@ Hey Dimeji, here is the complete, direct, up-to-date integration guide for all b
 
 ---
 
-## 2. Authentication: Username OR Email Sign In
+## 2. Authentication: Complete Flows for All Parties
 
-Candidates can now log in using either their **username** or their **email address**.
-
-### Usage in Components:
-Import `login` from `@/lib/api`:
+### 2.1 Sign In (Username OR Email):
+Candidates and staff can log in using either their **username** or their **email address**:
 ```typescript
 import { login } from "@/lib/api";
 
-// In your form submit handler:
 try {
   const result = await login({
     identifier: usernameOrEmail, // e.g., "johndoe" or "john@example.com"
@@ -37,10 +34,58 @@ try {
   // result.session is automatically set into the supabase client!
   router.push("/dashboard");
 } catch (err: any) {
-  // Always returns generic, safe error message (e.g. "Invalid email/username or password")
-  alert(err.message);
+  alert(err.message); // Safe, generic error message (no user enumeration)
 }
 ```
+
+### 2.2 Forgot & Reset Password:
+```typescript
+import { sendPasswordResetEmail, updatePassword } from "@/lib/api";
+
+// Step 1: Send reset link from Sign In page:
+await sendPasswordResetEmail("user@example.com");
+
+// Step 2: On the reset password callback page (/reset-password):
+await updatePassword("newSecurePassword123!");
+```
+
+### 2.3 Email OTP Verification:
+For 6-digit confirmation codes sent to user inboxes:
+```typescript
+import { verifyEmailOtp, resendEmailOtp } from "@/lib/api";
+
+// Verify 6-digit code:
+const { session } = await verifyEmailOtp({
+  email: "user@example.com",
+  token: "123456",
+  type: "signup", // "signup" | "recovery" | "magiclink"
+});
+
+// Resend OTP code if expired:
+await resendEmailOtp("user@example.com", "signup");
+```
+
+### 2.4 15-Minute Session Inactivity Auto-Logout:
+Enforces strict 15-minute idle logout without custom backend server cookies:
+```typescript
+import { useIdleTimeout } from "@/lib/api";
+
+// Place in your root app layout or authenticated dashboard layout:
+export function DashboardLayout({ children }: { children: React.ReactNode }) {
+  useIdleTimeout({
+    timeoutMs: 15 * 60 * 1000, // 15 mins
+    warningMs: 13 * 60 * 1000, // 13 mins warning
+    onWarning: () => {
+      // Optional toast alert to candidate
+      alert("You will be logged out in 2 minutes due to inactivity.");
+    },
+    redirectUrl: "/signin?reason=timeout",
+  });
+
+  return <>{children}</>;
+}
+```
+
 
 ---
 
@@ -258,6 +303,11 @@ const { users, totalCount } = await getAdminUsers({
 // Suspend or Reactivate a candidate account
 await setUserActive("user-uuid", false); // Suspends user
 await setUserActive("user-uuid", true);  // Reactivates user
+
+// Promote or Demote user role (Super Admin only)
+import { setUserRole } from "@/lib/admin-api";
+await setUserRole("user-uuid", "admin"); // Promotes user to admin
+await setUserRole("user-uuid", "user");  // Demotes back to candidate
 ```
 
 ---

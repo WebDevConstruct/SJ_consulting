@@ -276,14 +276,50 @@ export async function getAdminUsers(opts?: {
 }
 
 /**
- * Toggle a user's is_active status (suspend or reactivate).
- * Only super_admin should call this in the UI.
+ * Change a user's platform role (promote to admin, demote to user).
+ * Strictly requires super_admin (enforced securely in admin-content Edge Function).
  */
-export async function setUserActive(userId: string, active: boolean): Promise<void> {
-  const { error } = await supabase
-    .from("profiles")
-    .update({ is_active: active })
-    .eq("id", userId);
+export async function setUserRole(
+  userId: string,
+  role: "user" | "admin" | "super_admin"
+): Promise<AdminUserSummary> {
+  const { data, error } = await supabase.functions.invoke("admin-content", {
+    method: "PUT",
+    body: {
+      resource: "user",
+      user_id: userId,
+      user_role: role,
+    },
+  });
 
-  if (error) throw new Error(error.message);
+  if (error || data?.error) {
+    throw new Error(data?.error ?? error?.message ?? "Failed to update user role");
+  }
+
+  return data as AdminUserSummary;
 }
+
+/**
+ * Toggle a user's is_active status (suspend or reactivate).
+ * Managed securely via admin-content Edge Function.
+ */
+export async function setUserActive(
+  userId: string,
+  active: boolean
+): Promise<AdminUserSummary> {
+  const { data, error } = await supabase.functions.invoke("admin-content", {
+    method: "PUT",
+    body: {
+      resource: "user",
+      user_id: userId,
+      is_active: active,
+    },
+  });
+
+  if (error || data?.error) {
+    throw new Error(data?.error ?? error?.message ?? "Failed to update user status");
+  }
+
+  return data as AdminUserSummary;
+}
+
